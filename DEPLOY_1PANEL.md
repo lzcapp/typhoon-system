@@ -34,7 +34,7 @@ services:
     # GHCR（GitHub Container Registry，推荐）
     image: ghcr.io/lzcapp/typhoon-system:latest
     # DockerHub（取消注释下行，注释上行即可切换）
-    # image: lzcapp/typhoon-system:latest
+    # image: seeleo/typhoon-system:latest
     container_name: typhoon-system
     restart: always
     ports:
@@ -72,7 +72,7 @@ services:
 
 ```bash
 # 克隆仓库
-git clone https://github.com/lzcapp/typhoon-system.git /opt/typhoon-system
+git clone https://github.com/seeleo/typhoon-system.git /opt/typhoon-system
 ```
 
 或通过 SCP/1Panel文件管理上传。
