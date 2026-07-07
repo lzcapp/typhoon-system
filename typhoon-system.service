@@ -1,0 +1,15 @@
+[Unit]
+Description=Typhoon Track Prediction System
+After=network.target
+
+[Service]
+Type=simple
+User=typhoon
+WorkingDirectory=/opt/typhoon-system/backend
+ExecStart=/opt/typhoon-system/backend/start.sh
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

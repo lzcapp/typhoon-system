@@ -1,0 +1,1538 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>台风路径预测系统 | Typhoon Path Prediction</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
+<link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" rel="stylesheet">
+<style>
+:root {
+  --bg-primary: #0a0e1a;
+  --bg-secondary: #111827;
+  --bg-card: #1a2332;
+  --bg-hover: #243044;
+  --text-primary: #e8edf5;
+  --text-secondary: #8899aa;
+  --text-muted: #556677;
+  --accent-blue: #3b82f6;
+  --accent-cyan: #06b6d4;
+  --accent-red: #ef4444;
+  --accent-orange: #f59e0b;
+  --accent-green: #22c55e;
+  --accent-purple: #a855f7;
+  --border-color: #2a3a4a;
+  --shadow: 0 4px 12px rgba(0,0,0,0.3);
+  --radius: 8px;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  font-family: 'Noto Sans SC', -apple-system, sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  height: 100vh;
+  overflow: hidden;
+}
+.app-layout {
+  display: grid;
+  grid-template-columns: 320px 1fr 280px;
+  grid-template-rows: 60px 1fr;
+  height: 100vh;
+}
+
+/* Header */
+.header {
+  grid-column: 1 / -1;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
+  z-index: 1000;
+}
+.header-logo {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.header-logo .icon {
+  width: 36px; height: 36px;
+  background: linear-gradient(135deg, var(--accent-blue), var(--accent-cyan));
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 18px;
+}
+.header-logo h1 {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+.header-logo .sub {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-left: 8px;
+}
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.header-btn {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  padding: 6px 14px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.2s;
+}
+.header-btn:hover { background: var(--bg-hover); border-color: var(--accent-blue); }
+.header-btn.active { background: var(--accent-blue); border-color: var(--accent-blue); }
+
+/* Left Panel - Typhoon List */
+.left-panel {
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.panel-title {
+  padding: 16px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.search-box {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-color);
+}
+.search-input {
+  width: 100%;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  color: var(--text-primary);
+  font-size: 13px;
+  outline: none;
+}
+.search-input:focus { border-color: var(--accent-blue); }
+.year-selector {
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.data-cache-panel {
+  padding: 4px 16px 8px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.year-selector label {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.year-select {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  padding: 4px 8px;
+  color: var(--text-primary);
+  font-size: 13px;
+  outline: none;
+}
+.typhoon-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+.typhoon-item {
+  padding: 12px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: all 0.2s;
+  border: 1px solid transparent;
+  margin-bottom: 4px;
+}
+.typhoon-item:hover { background: var(--bg-hover); }
+.typhoon-item.selected { background: var(--bg-hover); border-color: var(--accent-blue); }
+.typhoon-item .id-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+.typhoon-item .tfid {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent-cyan);
+}
+.typhoon-item .names {
+  font-size: 14px;
+  font-weight: 500;
+}
+.typhoon-item .meta {
+  font-size: 12px;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.typhoon-item .active-badge {
+  background: var(--accent-red);
+  color: #fff;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.typhoon-item .category-badge {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+}
+.category-td { background: #2d4a3e; color: #88bb99; }
+.category-ts { background: #2d5a4a; color: #99ccaa; }
+.category-sts { background: #3d5a3a; color: #aacc88; }
+.category-ty { background: #5a3a2a; color: #cc8866; }
+.category-sty { background: #5a2a1a; color: #ee7755; }
+.category-super { background: #5a1a1a; color: #ff5544; }
+
+/* Map */
+.map-container {
+  position: relative;
+}
+#map {
+  width: 100%;
+  height: 100%;
+}
+.map-overlay {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 800;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.map-control-btn {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  width: 36px; height: 36px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  transition: all 0.2s;
+}
+.map-control-btn:hover { background: var(--accent-blue); }
+
+.legend {
+  position: absolute;
+  bottom: 12px;
+  left: 12px;
+  z-index: 800;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  padding: 12px;
+  font-size: 12px;
+}
+.legend-title {
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--text-secondary);
+}
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.legend-color {
+  width: 24px;
+  height: 4px;
+  border-radius: 2px;
+}
+
+/* Right Panel - Details */
+.right-panel {
+  background: var(--bg-secondary);
+  border-left: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.detail-title {
+  padding: 16px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-color);
+}
+.detail-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+}
+.detail-section {
+  margin-bottom: 20px;
+}
+.detail-section h3 {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent-cyan);
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.info-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.info-item {
+  background: var(--bg-card);
+  border-radius: 6px;
+  padding: 8px;
+}
+.info-item .label {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 2px;
+}
+.info-item .value {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+/* Prediction Panel */
+.prediction-controls {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.pred-btn {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.2s;
+}
+.pred-btn:hover { background: var(--bg-hover); }
+.pred-btn.active { background: var(--accent-blue); border-color: var(--accent-blue); }
+
+.pred-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.pred-table th {
+  text-align: left;
+  padding: 6px 4px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-color);
+  font-weight: 500;
+}
+.pred-table td {
+  padding: 6px 4px;
+  border-bottom: 1px solid var(--border-color);
+}
+.pred-confidence {
+  display: inline-block;
+  width: 40px;
+  height: 4px;
+  background: var(--bg-card);
+  border-radius: 2px;
+  position: relative;
+}
+.pred-confidence-bar {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent-green);
+}
+
+/* Track timeline */
+.track-timeline {
+  margin-bottom: 20px;
+}
+.timeline-point {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 6px 0;
+  font-size: 12px;
+}
+.timeline-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-top: 2px;
+}
+.timeline-info {
+  flex: 1;
+}
+.timeline-time {
+  color: var(--text-secondary);
+}
+.timeline-pos {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+/* Forecast tabs */
+.forecast-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.forecast-tab {
+  padding: 4px 10px;
+  background: var(--bg-card);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.forecast-tab:hover { background: var(--bg-hover); color: var(--text-primary); }
+.forecast-tab.active { background: var(--accent-purple); color: #fff; }
+
+/* Loading */
+.loading-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(10,14,26,0.8);
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 16px;
+}
+.spinner {
+  width: 40px; height: 40px;
+  border: 3px solid var(--border-color);
+  border-top-color: var(--accent-blue);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.loading-text { color: var(--text-secondary); font-size: 14px; }
+
+/* Empty state */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+  color: var(--text-muted);
+  text-align: center;
+}
+.empty-state i {
+  font-size: 48px;
+  margin-bottom: 16px;
+  color: var(--border-color);
+}
+.empty-state p { font-size: 14px; }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: var(--bg-primary); }
+::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* Toast */
+.toast {
+  position: fixed;
+  top: 80px;
+  right: 20px;
+  background: var(--bg-card);
+  border: 1px solid var(--accent-blue);
+  border-radius: var(--radius);
+  padding: 12px 20px;
+  font-size: 13px;
+  z-index: 3000;
+  opacity: 0;
+  transform: translateY(-20px);
+  transition: all 0.3s;
+}
+.toast.show { opacity: 1; transform: translateY(0); }
+.toast.error { border-color: var(--accent-red); }
+</style>
+</head>
+<body>
+
+<div class="app-layout">
+  <!-- Header -->
+  <header class="header">
+    <div class="header-logo">
+      <div class="icon"><i class="fas fa-wind"></i></div>
+      <h1>台风路径预测系统</h1>
+      <span class="sub">Typhoon Path Prediction System</span>
+    </div>
+    <div class="header-actions">
+      <button class="header-btn" id="btnCurrent" onclick="loadCurrentTyphoons()">
+        <i class="fas fa-satellite-dish"></i> 活跃台风
+      </button>
+      <button class="header-btn" id="btnPredict" onclick="runPrediction()">
+        <i class="fas fa-brain"></i> AI 预测
+      </button>
+      <button class="header-btn" onclick="refreshData()">
+        <i class="fas fa-sync-alt"></i> 刷新数据
+      </button>
+    </div>
+  </header>
+
+  <!-- Left Panel -->
+  <div class="left-panel">
+    <div class="panel-title">
+      <span><i class="fas fa-list"></i> 台风列表</span>
+      <span id="typhoonCount">0</span>
+    </div>
+    <div class="search-box">
+      <input type="text" class="search-input" placeholder="搜索台风名称/编号..." id="searchInput" onkeyup="searchTyphoons()">
+    </div>
+    <div class="year-selector">
+      <label>年份:</label>
+      <select class="year-select" id="yearSelect"></select>
+      <label>数据源:</label>
+      <select class="year-select" id="sourceSelect" onchange="loadYearTyphoons()">
+        <option value="isc">ISC (中国)</option>
+        <option value="nii">NII (日本)</option>
+      </select>
+    </div>
+    <div class="data-cache-panel" id="dataCachePanel">
+      <button class="pred-btn" style="font-size:12px;padding:4px 10px" onclick="cacheAllData()">
+        <i class="fas fa-download"></i> 缓存历史数据
+      </button>
+      <span id="dataStatus" style="font-size:12px;color:var(--text-secondary);margin-left:6px"></span>
+    </div>
+    <div class="typhoon-list" id="typhoonList">
+      <div class="empty-state">
+        <i class="fas fa-cloud-sun-rain"></i>
+        <p>选择年份或查看活跃台风<br>开始探索台风数据</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Map -->
+  <div class="map-container">
+    <div id="map"></div>
+    <div class="map-overlay">
+      <button class="map-control-btn" onclick="togglePredictionLayers()" title="切换预测图层"><i class="fas fa-eye"></i></button>
+      <button class="map-control-btn" onclick="toggleWindRadius()" title="切换风圈"><i class="fas fa-circle-notch"></i></button>
+      <button class="map-control-btn" onclick="centerOnTyphoon()" title="定位台风"><i class="fas fa-crosshairs"></i></button>
+      <button class="map-control-btn" onclick="resetMapView()" title="重置视图"><i class="fas fa-expand"></i></button>
+    </div>
+    <div class="legend">
+      <div class="legend-title">台风等级</div>
+      <div class="legend-item"><div class="legend-color" style="background:#88bb99"></div>热带低压(TD)</div>
+      <div class="legend-item"><div class="legend-color" style="background:#55dd66"></div>热带风暴(TS)</div>
+      <div class="legend-item"><div class="legend-color" style="background:#ddcc44"></div>强热带风暴(STS)</div>
+      <div class="legend-item"><div class="legend-color" style="background:#ff8844"></div>台风(TY)</div>
+      <div class="legend-item"><div class="legend-color" style="background:#ff5533"></div>强台风(STY)</div>
+      <div class="legend-item"><div class="legend-color" style="background:#ff2222"></div>超强台风(Super TY)</div>
+      <hr style="border-color:var(--border-color);margin:8px 0">
+      <div class="legend-item"><div class="legend-color" style="background:#3b82f6"></div>趋势外推</div>
+      <div class="legend-item"><div class="legend-color" style="background:#a855f7"></div>物理模型</div>
+      <div class="legend-item"><div class="legend-color" style="background:#06b6d4"></div>Kalman融合</div>
+      <div class="legend-item"><div class="legend-color" style="background:#f59e0b"></div>GFS数值预报</div>
+      <div class="legend-item"><div class="legend-color" style="background:#14b8a6"></div>ECMWF AIFS AI</div>
+      <div class="legend-item"><div class="legend-color" style="background:#f97316"></div>CMA GRAPES</div>
+      <div class="legend-item"><div class="legend-color" style="background:#ef4444"></div>GraphCast AI</div>
+      <div class="legend-item"><div class="legend-color" style="background:#84cc16"></div>历史类比</div>
+      <div class="legend-item"><div class="legend-color" style="background:#ec4899"></div>LSTM深度学习</div>
+      <div class="legend-item"><div class="legend-color" style="background:#8b5cf6"></div>盘古大模型(Pangu)</div>
+      <div class="legend-item"><div class="legend-color" style="background:#f59e0b"></div>机构预报</div>
+    </div>
+  </div>
+
+  <!-- Right Panel -->
+  <div class="right-panel">
+    <div class="detail-title"><i class="fas fa-info-circle"></i> 台风详情</div>
+    <div class="detail-content" id="detailContent">
+      <div class="empty-state">
+        <i class="fas fa-mouse-pointer"></i>
+        <p>点击左侧台风列表<br>查看详细信息与预测</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="loading-overlay" id="loadingOverlay" style="display:none">
+  <div class="spinner"></div>
+  <div class="loading-text" id="loadingText">加载中...</div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+// ============================================================
+// 全局状态
+// ============================================================
+const API_BASE = 'http://localhost:8088';  // 后端地址
+let map;
+let currentTyphoons = [];
+let selectedTyphoon = null;
+let trackLayers = [];
+let predictionLayers = [];
+let windRadiusLayers = [];
+let showPrediction = true;
+let showWindRadius = false;
+let activePredictionMethod = 'ensemble';
+let activeForecastAgency = null;
+
+const CATEGORY_COLORS = {
+  '热带低压(TD)': '#88bb99',
+  '热带风暴(TS)': '#55dd66',
+  '强热带风暴(STS)': '#ddcc44',
+  '台风(TY)': '#ff8844',
+  '强台风(STY)': '#ff5533',
+  '超强台风(Super TY)': '#ff2222',
+  '超强台风(SuperTY)': '#ff2222',
+};
+
+const PRED_COLORS = {
+  trend: '#3b82f6',
+  physics: '#a855f7',
+  gfs: '#f59e0b',
+  aifs: '#14b8a6',
+  cma: '#f97316',
+  gfs_graphcast: '#ef4444',
+  analog: '#84cc16',
+  lstm: '#ec4899',
+  pangu: '#8b5cf6',
+  ensemble: '#06b6d4',
+};
+
+// ============================================================
+// 初始化
+// ============================================================
+function initApp() {
+  initMap();
+  initYearSelector();
+  // 首次进入：默认加载本年度数据 + 自动缓存 + 检查活跃台风
+  loadDefaultYearData();
+  checkLSTMStatus();
+  // 自动刷新：每5分钟检查活跃台风
+  startAutoRefresh();
+}
+
+function initMap() {
+  map = L.map('map', {
+    center: [20, 130],
+    zoom: 4,
+    minZoom: 2,
+    maxZoom: 12,
+    zoomControl: false,
+  });
+
+  // 深色地图底图
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    attribution: '&copy; <a href="https://carto.com/">CARTO</a>',
+    subdomains: 'abcd',
+    maxZoom: 19
+  }).addTo(map);
+
+  // 添加海岸线标注
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png', {
+    subdomains: 'abcd',
+    maxZoom: 19,
+    pane: 'overlayPane'
+  }).addTo(map);
+}
+
+function initYearSelector() {
+  const select = document.getElementById('yearSelect');
+  const currentYear = new Date().getFullYear();
+  for (let y = currentYear; y >= 1945; y--) {
+    const opt = document.createElement('option');
+    opt.value = y;
+    opt.textContent = y + '年';
+    if (y === currentYear) opt.selected = true;
+    select.appendChild(opt);
+  }
+  // 年份切换时自动加载数据
+  select.addEventListener('change', () => loadYearTyphoons());
+  // 初始化时检查数据状态
+  checkDataStatus();
+}
+
+async function checkDataStatus() {
+  try {
+    const resp = await fetch(API_BASE + '/api/data/status');
+    const status = await resp.json();
+    const el = document.getElementById('dataStatus');
+    if (el) {
+      const total = status.total_cached_files || 0;
+      const currentYear = status.current_year || 2026;
+      const currentCached = status.cached_years[currentYear] || 0;
+      el.textContent = `本地缓存${total}月数据 | ${currentYear}年${currentCached}月`;
+      el.style.color = total > 0 ? '#22c55e' : 'var(--text-secondary)';
+    }
+  } catch(e) {
+    console.log('Data status check failed', e);
+  }
+}
+
+async function cacheAllData() {
+  const btn = event.target;
+  btn.disabled = true;
+  btn.textContent = '⏳ 缓存中...';
+  showLoading('正在批量缓存历史数据，可能需要几分钟...');
+
+  try {
+    // 先缓存近5年（最常用）
+    const resp1 = await fetch(API_BASE + '/api/data/cache', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({start_year: 2021, end_year: new Date().getFullYear()})
+    });
+    const result1 = await resp1.json();
+
+    // 再缓存2015-2020（LSTM训练需要）
+    const resp2 = await fetch(API_BASE + '/api/data/cache', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({start_year: 2015, end_year: 2020})
+    });
+    const result2 = await resp2.json();
+
+    hideLoading();
+    showToast(`缓存完成! 近5年: ${result1.message}, 2015-2020: ${result2.message}`);
+    checkDataStatus();
+  } catch(e) {
+    hideLoading();
+    showToast('缓存失败: ' + e.message, true);
+  }
+
+  btn.disabled = false;
+  btn.innerHTML = '<i class="fas fa-download"></i> 缓存历史数据';
+}
+
+// ============================================================
+// 默认加载：本年度数据 + 自动缓存 + 活跃台风检查
+// ============================================================
+async function loadDefaultYearData() {
+  showLoading('加载台风数据...');
+
+  // 先触发当前年份数据缓存（后台执行，不阻塞）
+  fetch(API_BASE + '/api/data/cache-current-year').catch(() => {});
+
+  // 检查是否有活跃台风
+  const currentData = await apiCall('/api/typhoons/current');
+  if (currentData && currentData.typhoons && currentData.count > 0) {
+    currentTyphoons = currentData.typhoons;
+    renderTyphoonList(currentData.typhoons);
+    showToast(`发现 ${currentData.count} 个活跃台风`);
+  } else {
+    // 没有活跃台风，加载当前年份全部数据
+    const year = new Date().getFullYear();
+    document.getElementById('yearSelect').value = year;
+    const yearData = await apiCall(`/api/typhoons/year/${year}`);
+    if (yearData && yearData.typhoons) {
+      currentTyphoons = yearData.typhoons;
+      renderTyphoonList(yearData.typhoons);
+      showToast(`${year}年共 ${yearData.count} 个台风（暂无活跃台风）`);
+    }
+  }
+  hideLoading();
+}
+
+// ============================================================
+// 自动刷新：每5分钟检查活跃台风
+// ============================================================
+let refreshInterval = null;
+function startAutoRefresh() {
+  if (refreshInterval) clearInterval(refreshInterval);
+  refreshInterval = setInterval(async () => {
+    const data = await apiCall('/api/typhoons/current');
+    if (data && data.typhoons && data.count > 0) {
+      currentTyphoons = data.typhoons;
+      renderTyphoonList(data.typhoons);
+      showToast(`自动刷新: ${data.count} 个活跃台风`);
+      // 如果有活跃台风，地图中心移到最新位置
+      const lastPoint = data.typhoons[0]?.points?.[data.typhoons[0].points.length - 1];
+      if (lastPoint && map) {
+        map.setView([lastPoint.lat, lastPoint.lng], 5, { animate: true });
+      }
+    }
+  }, 5 * 60 * 1000); // 5分钟
+}
+
+// ============================================================
+// 数据加载
+// ============================================================
+function showLoading(text) {
+  document.getElementById('loadingText').textContent = text || '加载中...';
+  document.getElementById('loadingOverlay').style.display = 'flex';
+}
+function hideLoading() {
+  document.getElementById('loadingOverlay').style.display = 'none';
+}
+function showToast(msg, isError) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast show' + (isError ? ' error' : '');
+  setTimeout(() => t.className = 'toast', 3000);
+}
+
+async function apiCall(url) {
+  try {
+    const resp = await fetch(API_BASE + url);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return await resp.json();
+  } catch (e) {
+    console.error('API Error:', e);
+    showToast('数据加载失败: ' + e.message, true);
+    return null;
+  }
+}
+
+async function loadCurrentTyphoons() {
+  showLoading('获取活跃台风数据...');
+  document.getElementById('btnCurrent').classList.add('active');
+  const data = await apiCall('/api/typhoons/current');
+  if (data && data.typhoons) {
+    currentTyphoons = data.typhoons;
+    renderTyphoonList(data.typhoons);
+    showToast(`发现 ${data.count} 个活跃台风`);
+  } else {
+    // 如果没有活跃台风，加载当前年份的
+    showToast('暂无活跃台风，加载本年度数据');
+    await loadYearTyphoons();
+  }
+  hideLoading();
+  document.getElementById('btnCurrent').classList.remove('active');
+}
+
+async function loadYearTyphoons() {
+  const year = document.getElementById('yearSelect').value;
+  showLoading(`加载 ${year} 年台风数据...`);
+  // 后台缓存该年份数据
+  fetch(API_BASE + `/api/data/cache?start_year=${year}&end_year=${year}`).catch(() => {});
+  const data = await apiCall(`/api/typhoons/year/${year}`);
+  if (data && data.typhoons) {
+    currentTyphoons = data.typhoons;
+    renderTyphoonList(data.typhoons);
+    showToast(`${year}年共 ${data.count} 个台风`);
+  }
+  hideLoading();
+}
+
+function searchTyphoons() {
+  const keyword = document.getElementById('searchInput').value;
+  if (!keyword) {
+    renderTyphoonList(currentTyphoons);
+    return;
+  }
+  const filtered = currentTyphoons.filter(t =>
+    (t.name_cn && t.name_cn.includes(keyword)) ||
+    (t.name_en && t.name_en.toLowerCase().includes(keyword.toLowerCase())) ||
+    (t.id && t.id.includes(keyword))
+  );
+  renderTyphoonList(filtered);
+}
+
+function refreshData() {
+  const year = document.getElementById('yearSelect').value;
+  loadYearTyphoons();
+}
+
+// ============================================================
+// 列表渲染
+// ============================================================
+function renderTyphoonList(typhoons) {
+  const container = document.getElementById('typhoonList');
+  document.getElementById('typhoonCount').textContent = typhoons.length;
+
+  if (!typhoons.length) {
+    container.innerHTML = '<div class="empty-state"><i class="fas fa-cloud"></i><p>暂无台风数据</p></div>';
+    return;
+  }
+
+  container.innerHTML = typhoons.map(t => {
+    const maxCat = getMaxCategory(t);
+    const catClass = getCategoryClass(maxCat);
+    const catColor = CATEGORY_COLORS[maxCat] || '#888';
+    const lastPoint = t.points && t.points.length > 0 ? t.points[t.points.length - 1] : null;
+    const isActive = t.is_current === 1;
+
+    return `<div class="typhoon-item" data-id="${t.id}" onclick="selectTyphoon('${t.id}')">
+      <div class="id-row">
+        <span class="tfid">${t.id}</span>
+        ${isActive ? '<span class="active-badge">活跃</span>' : ''}
+        <span class="category-badge ${catClass}" style="background:${catColor}22;color:${catColor}">${maxCat || '未知'}</span>
+      </div>
+      <div class="names">${t.name_cn || ''} ${t.name_en ? '(' + t.name_en + ')' : ''}</div>
+      <div class="meta">
+        <span>${t.begin_time ? t.begin_time.slice(0,10) : ''} ~ ${t.end_time ? t.end_time.slice(0,10) : ''}</span>
+        <span>${t.points ? t.points.length + '个数据点' : ''}</span>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function getMaxCategory(typhoon) {
+  if (!typhoon.points || !typhoon.points.length) return '';
+  // 找最强等级
+  let maxPower = 0;
+  let maxCat = '';
+  for (const p of typhoon.points) {
+    if (p.power > maxPower) {
+      maxPower = p.power;
+      maxCat = p.category;
+    }
+  }
+  return maxCat;
+}
+
+function getCategoryClass(cat) {
+  if (!cat) return '';
+  if (cat.includes('TD')) return 'category-td';
+  if (cat.includes('Super')) return 'category-super';
+  if (cat.includes('STY')) return 'category-sty';
+  if (cat.includes('TY')) return 'category-ty';
+  if (cat.includes('STS')) return 'category-sts';
+  if (cat.includes('TS')) return 'category-ts';
+  return '';
+}
+
+// ============================================================
+// 台风选择与详情
+// ============================================================
+async function selectTyphoon(id) {
+  // 高亮选中
+  document.querySelectorAll('.typhoon-item').forEach(el => {
+    el.classList.toggle('selected', el.dataset.id === id);
+  });
+
+  showLoading('加载台风详情...');
+  selectedTyphoon = id;
+
+  const data = await apiCall(`/api/typhoons/detail/${id}`);
+  if (data) {
+    renderTyphoonDetail(data);
+    renderTrackOnMap(data);
+  }
+  hideLoading();
+}
+
+function renderTyphoonDetail(t) {
+  const container = document.getElementById('detailContent');
+  const lastPoint = t.points && t.points.length ? t.points[t.points.length - 1] : null;
+
+  let html = `
+    <div class="detail-section">
+      <h3><i class="fas fa-cloud-showers-heavy"></i> 基本信息</h3>
+      <div class="info-grid">
+        <div class="info-item"><div class="label">编号</div><div class="value">${t.id}</div></div>
+        <div class="info-item"><div class="label">中文名</div><div class="value">${t.name_cn || '-'}</div></div>
+        <div class="info-item"><div class="label">英文名</div><div class="value">${t.name_en || '-'}</div></div>
+        <div class="info-item"><div class="label">数据源</div><div class="value">${t.source}</div></div>
+        <div class="info-item"><div class="label">起始时间</div><div class="value">${t.begin_time ? t.begin_time.slice(0,16) : '-'}</div></div>
+        <div class="info-item"><div class="label">结束时间</div><div class="value">${t.end_time ? t.end_time.slice(0,16) : '-'}</div></div>
+        <div class="info-item"><div class="label">数据点数</div><div class="value">${t.points ? t.points.length : 0}</div></div>
+        <div class="info-item"><div class="label">登陆次数</div><div class="value">${t.landfalls ? t.landfalls.length : 0}</div></div>
+      </div>
+    </div>`;
+
+  if (lastPoint) {
+    html += `
+    <div class="detail-section">
+      <h3><i class="fas fa-map-marker-alt"></i> 最新位置</h3>
+      <div class="info-grid">
+        <div class="info-item"><div class="label">纬度</div><div class="value">${lastPoint.lat}°N</div></div>
+        <div class="info-item"><div class="label">经度</div><div class="value">${lastPoint.lng}°E</div></div>
+        <div class="info-item"><div class="label">气压</div><div class="value">${lastPoint.pressure || '-'} hPa</div></div>
+        <div class="info-item"><div class="label">风速</div><div class="value">${lastPoint.wind_speed || '-'} m/s</div></div>
+        <div class="info-item"><div class="label">等级</div><div class="value">${lastPoint.power || '-'}级</div></div>
+        <div class="info-item"><div class="label">分类</div><div class="value" style="color:${CATEGORY_COLORS[lastPoint.category]||'#fff'}">${lastPoint.category || '-'}</div></div>
+        <div class="info-item"><div class="label">移向</div><div class="value">${lastPoint.move_dir || '-'}</div></div>
+        <div class="info-item"><div class="label">移速</div><div class="value">${lastPoint.move_speed || '-'} km/h</div></div>
+      </div>
+    </div>`;
+  }
+
+  // 预测控制
+  html += `
+    <div class="detail-section">
+      <h3><i class="fas fa-brain"></i> AI 路径预测</h3>
+      <div class="prediction-controls" style="flex-wrap:wrap">
+        <button class="pred-btn ${activePredictionMethod==='trend'?'active':''}" onclick="setPredMethod('trend')">趋势外推</button>
+        <button class="pred-btn ${activePredictionMethod==='physics'?'active':''}" onclick="setPredMethod('physics')">物理模型</button>
+        <button class="pred-btn ${activePredictionMethod==='gfs'?'active':''}" onclick="setPredMethod('gfs')">GFS预报</button>
+        <button class="pred-btn ${activePredictionMethod==='aifs'?'active':''}" onclick="setPredMethod('aifs')">🟢 AIFS</button>
+        <button class="pred-btn ${activePredictionMethod==='cma'?'active':''}" onclick="setPredMethod('cma')">🟠 CMA</button>
+        <button class="pred-btn ${activePredictionMethod==='gfs_graphcast'?'active':''}" onclick="setPredMethod('gfs_graphcast')">GraphCast</button>
+        <button class="pred-btn ${activePredictionMethod==='analog'?'active':''}" onclick="setPredMethod('analog')">历史类比</button>
+        <button class="pred-btn ${activePredictionMethod==='lstm'?'active':''}" onclick="setPredMethod('lstm')">🧠 LSTM</button>
+        <button class="pred-btn ${activePredictionMethod==='pangu'?'active':''}" onclick="setPredMethod('pangu')">🔮 盘古</button>
+        <button class="pred-btn ${activePredictionMethod==='ensemble'?'active':''}" onclick="setPredMethod('ensemble')">综合融合</button>
+        <button class="pred-btn ${activePredictionMethod==='all'?'active':''}" onclick="setPredMethod('all')">全部方法</button>
+      </div>
+      <div class="prediction-controls">
+        <button class="pred-btn" onclick="runPredictionFor(24)">24h</button>
+        <button class="pred-btn" onclick="runPredictionFor(48)">48h</button>
+        <button class="pred-btn active" onclick="runPredictionFor(72)">72h</button>
+        <button class="pred-btn" onclick="runPredictionFor(120)">120h</button>
+      </div>
+      <div id="predictionResults"></div>
+      <div id="lstmTrainPanel" style="margin-top:8px;display:none">
+        <button class="pred-btn" style="background:#ec4899;color:#fff;border:none" onclick="trainLSTM()">
+          <i class="fas fa-cogs"></i> 训练LSTM模型（需ISC数据）
+        </button>
+        <span id="lstmStatus" style="font-size:12px;color:var(--text-secondary);margin-left:6px"></span>
+      </div>
+    </div>`;
+
+  // 机构预报
+  if (t.forecasts && Object.keys(t.forecasts).length > 0) {
+    html += `
+    <div class="detail-section">
+      <h3><i class="fas fa-building"></i> 机构预报</h3>
+      <div class="forecast-tabs">
+        ${Object.keys(t.forecasts).map(agency =>
+          `<div class="forecast-tab" onclick="showForecast('${agency}')">${agency}</div>`
+        ).join('')}
+      </div>
+      <div id="forecastContent"></div>
+    </div>`;
+  }
+
+  // 轨迹时间线
+  if (t.points && t.points.length > 0) {
+    const displayPoints = t.points.filter((_, i) => i % Math.ceil(t.points.length / 20) === 0 || i === t.points.length - 1);
+    html += `
+    <div class="detail-section">
+      <h3><i class="fas fa-route"></i> 路径时间线</h3>
+      <div class="track-timeline">
+        ${displayPoints.map(p => `
+          <div class="timeline-point">
+            <div class="timeline-dot" style="background:${CATEGORY_COLORS[p.category]||'#888'}"></div>
+            <div class="timeline-info">
+              <div class="timeline-time">${p.time ? p.time.slice(0,16) : '-'}</div>
+              <div class="timeline-pos">${p.lat}°N, ${p.lng}°E | ${p.pressure||'-'}hPa | ${p.category||'-'}</div>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    </div>`;
+  }
+
+  container.innerHTML = html;
+}
+
+function showForecast(agency) {
+  document.querySelectorAll('.forecast-tab').forEach(el => el.classList.remove('active'));
+  event.target.classList.add('active');
+  activeForecastAgency = agency;
+
+  if (!selectedTyphoon) return;
+  const t = currentTyphoons.find(t => t.id === selectedTyphoon);
+  if (!t || !t.forecasts || !t.forecasts[agency]) return;
+
+  const fc = t.forecasts[agency];
+  const container = document.getElementById('forecastContent');
+  container.innerHTML = `
+    <div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px">
+      预报基准时间: ${fc.forecast_time ? fc.forecast_time.slice(0,16) : '-'}
+    </div>
+    <table class="pred-table">
+      <tr><th>时间</th><th>位置</th><th>气压</th><th>风速</th><th>等级</th></tr>
+      ${fc.points.map(p => `
+        <tr>
+          <td>${p.time ? p.time.slice(0,16) : '-'}</td>
+          <td>${p.lat}°N, ${p.lng}°E</td>
+          <td>${p.pressure || '-'} hPa</td>
+          <td>${p.wind_speed || '-'} m/s</td>
+          <td style="color:${CATEGORY_COLORS[p.category]||'#fff'}">${p.category || '-'}</td>
+        </tr>
+      `).join('')}
+    </table>`;
+
+  // 在地图上显示机构预报
+  renderForecastOnMap(t, agency);
+}
+
+// ============================================================
+// 地图渲染
+// ============================================================
+function clearMapLayers() {
+  trackLayers.forEach(l => map.removeLayer(l));
+  predictionLayers.forEach(l => map.removeLayer(l));
+  windRadiusLayers.forEach(l => map.removeLayer(l));
+  trackLayers = [];
+  predictionLayers = [];
+  windRadiusLayers = [];
+}
+
+function renderTrackOnMap(t) {
+  clearMapLayers();
+
+  if (!t.points || !t.points.length) return;
+
+  // 绘制路径线段（按等级分段变色）
+  let prevPoint = null;
+  for (const p of t.points) {
+    const color = CATEGORY_COLORS[p.category] || '#888';
+    if (prevPoint) {
+      const line = L.polyline(
+        [[prevPoint.lat, prevPoint.lng], [p.lat, p.lng]],
+        { color: color, weight: 3, opacity: 0.8 }
+      ).addTo(map);
+      trackLayers.push(line);
+    }
+
+    // 绘制数据点
+    const marker = L.circleMarker([p.lat, p.lng], {
+      radius: p.power ? Math.max(3, Math.min(8, p.power - 4)) : 4,
+      fillColor: color,
+      fillOpacity: 0.9,
+      color: '#fff',
+      weight: 1,
+      opacity: 0.5,
+    }).addTo(map);
+    marker.bindTooltip(`
+      <div style="font-size:12px;line-height:1.4">
+        <strong>${t.name_cn || t.name_en || t.id}</strong><br>
+        ${p.time ? p.time.slice(0,16) : ''}<br>
+        ${p.lat}°N, ${p.lng}°E<br>
+        气压: ${p.pressure || '-'} hPa<br>
+        风速: ${p.wind_speed || '-'} m/s<br>
+        ${p.category || '-'}
+      </div>
+    `, { className: 'typhoon-tooltip' });
+    trackLayers.push(marker);
+    prevPoint = p;
+  }
+
+  // 绘制风圈
+  if (showWindRadius) {
+    renderWindRadius(t);
+  }
+
+  // 显示预测路径（如果有）
+  if (showPrediction && selectedTyphoon) {
+    loadAndRenderPrediction(selectedTyphoon, 72, activePredictionMethod);
+  }
+
+  // 显示机构预报（如果有）
+  if (t.forecasts && Object.keys(t.forecasts).length > 0) {
+    for (const agency of Object.keys(t.forecasts)) {
+      renderForecastOnMap(t, agency);
+    }
+  }
+
+  // 调整视图范围
+  const bounds = L.latLngBounds(t.points.map(p => [p.lat, p.lng]));
+  map.fitBounds(bounds, { padding: [50, 50] });
+}
+
+function renderWindRadius(t) {
+  if (!t.points) return;
+  const lastPoint = t.points[t.points.length - 1];
+  if (!lastPoint) return;
+
+  // 七级风圈
+  if (lastPoint.radius7 && lastPoint.radius7 > 0) {
+    const circle = L.circle([lastPoint.lat, lastPoint.lng], {
+      radius: lastPoint.radius7 * 1000, // km -> m
+      color: '#55dd66',
+      fillColor: '#55dd66',
+      fillOpacity: 0.15,
+      weight: 1,
+    }).addTo(map);
+    windRadiusLayers.push(circle);
+
+    // 四象限风圈
+    if (lastPoint.radius7_quad) {
+      const quads = lastPoint.radius7_quad;
+      drawWindQuadrant(lastPoint, quads, '#55dd66', 0.2);
+    }
+  }
+
+  // 十级风圈
+  if (lastPoint.radius10 && lastPoint.radius10 > 0) {
+    const circle = L.circle([lastPoint.lat, lastPoint.lng], {
+      radius: lastPoint.radius10 * 1000,
+      color: '#ff8844',
+      fillColor: '#ff8844',
+      fillOpacity: 0.12,
+      weight: 1,
+    }).addTo(map);
+    windRadiusLayers.push(circle);
+  }
+}
+
+function drawWindQuadrant(point, quads, color, opacity) {
+  const ne = quads.ne || 0;
+  const se = quads.se || 0;
+  const sw = quads.sw || 0;
+  const nw = quads.nw || 0;
+  if (!ne && !se && !sw && !nw) return;
+
+  // 绘制每个象限的风圈弧
+  const center = [point.lat, point.lng];
+  const angles = {
+    ne: [0, 90],
+    se: [90, 180],
+    sw: [180, 270],
+    nw: [270, 360]
+  };
+
+  for (const [dir, r] of Object.entries(quads)) {
+    if (r <= 0) continue;
+    const [startAngle, endAngle] = angles[dir];
+    const points = [];
+    for (let a = startAngle; a <= endAngle; a += 5) {
+      const rad = a * Math.PI / 180;
+      const dlat = r * Math.cos(rad) / 111.32;
+      const dlng = r * Math.sin(rad) / (111.32 * Math.cos(point.lat * Math.PI / 180));
+      points.push([point.lat + dlat, point.lng + dlng]);
+    }
+    points.push(center);
+    const polygon = L.polygon(points, {
+      color: color,
+      fillColor: color,
+      fillOpacity: opacity,
+      weight: 1,
+    }).addTo(map);
+    windRadiusLayers.push(polygon);
+  }
+}
+
+function renderForecastOnMap(t, agency) {
+  if (!t.forecasts || !t.forecasts[agency]) return;
+  const fc = t.forecasts[agency];
+
+  // 找预报的基准点
+  let basePoint = null;
+  if (t.points && t.points.length) {
+    for (const p of t.points) {
+      if (p.time && fc.forecast_time && p.time.slice(0,16) === fc.forecast_time.slice(0,16)) {
+        basePoint = p;
+        break;
+      }
+    }
+    if (!basePoint) basePoint = t.points[t.points.length - 1];
+  }
+
+  const fcPoints = fc.points;
+  if (!fcPoints || !fcPoints.length) return;
+
+  // 从基准点到预报点的连线
+  const allCoords = [];
+  if (basePoint) allCoords.push([basePoint.lat, basePoint.lng]);
+  for (const p of fcPoints) {
+    allCoords.push([p.lat, p.lng]);
+  }
+
+  const line = L.polyline(allCoords, {
+    color: '#f59e0b',
+    weight: 2,
+    opacity: 0.7,
+    dashArray: '8, 4',
+  }).addTo(map);
+  trackLayers.push(line);
+
+  // 预报点标记
+  for (const p of fcPoints) {
+    const marker = L.circleMarker([p.lat, p.lng], {
+      radius: 4,
+      fillColor: '#f59e0b',
+      fillOpacity: 0.8,
+      color: '#fff',
+      weight: 1,
+    }).addTo(map);
+    marker.bindTooltip(`
+      <div style="font-size:12px">
+        <strong>[${agency}预报]</strong><br>
+        ${p.time ? p.time.slice(0,16) : ''}<br>
+        ${p.lat}°N, ${p.lng}°E<br>
+        ${p.pressure || '-'} hPa
+      </div>
+    `);
+    trackLayers.push(marker);
+  }
+}
+
+// ============================================================
+// 预测功能
+// ============================================================
+function setPredMethod(method) {
+  activePredictionMethod = method;
+  document.querySelectorAll('.pred-btn').forEach(el => {
+    const map = {'趋势':'trend','物理':'physics','GFS':'gfs','AIFS':'aifs','CMA':'cma','GraphCast':'gfs_graphcast','历史':'analog','LSTM':'lstm','盘古':'pangu','综合':'ensemble','全部':'all'};
+    const key = Object.keys(map).find(k => el.textContent.includes(k));
+    el.classList.toggle('active', key && map[key] === method);
+  });
+  if (selectedTyphoon) {
+    loadAndRenderPrediction(selectedTyphoon, 72, method);
+  }
+}
+
+async function runPrediction() {
+  if (!selectedTyphoon) {
+    showToast('请先选择一个台风', true);
+    return;
+  }
+  await runPredictionFor(72);
+}
+
+async function runPredictionFor(hours) {
+  if (!selectedTyphoon) {
+    showToast('请先选择一个台风', true);
+    return;
+  }
+
+  // 检查LSTM方法是否可用
+  if (activePredictionMethod === 'lstm' || activePredictionMethod === 'all') {
+    try {
+      const statusResp = await fetch(`${API_BASE}/api/lstm/status`);
+      const status = await statusResp.json();
+      if (!status.ready) {
+        showToast('LSTM模型尚未训练，请先训练模型或切换其他方法', true);
+        const panel = document.getElementById('lstmTrainPanel');
+        if (panel) panel.style.display = 'block';
+        return;
+      }
+    } catch(e) {}
+  }
+
+  showLoading(`AI 预测计算中 (${hours}h, ${activePredictionMethod})...`);
+  await loadAndRenderPrediction(selectedTyphoon, hours, activePredictionMethod);
+  hideLoading();
+  showToast(`预测完成: ${hours}小时 ${activePredictionMethod} 方法`);
+}
+
+async function checkLSTMStatus() {
+  try {
+    const resp = await fetch(`${API_BASE}/api/lstm/status`);
+    const status = await resp.json();
+    const el = document.getElementById('lstmStatus');
+    const panel = document.getElementById('lstmTrainPanel');
+    if (el) {
+      if (status.ready) {
+        el.textContent = '✅ LSTM模型已就绪';
+        el.style.color = '#22c55e';
+      } else {
+        el.textContent = '⚠️ LSTM模型未训练';
+        el.style.color = '#f59e0b';
+      }
+    }
+    if (panel) panel.style.display = 'block';
+  } catch(e) {
+    console.log('LSTM status check failed', e);
+  }
+}
+
+async function trainLSTM() {
+  showLoading('正在训练LSTM模型，可能需要1-3分钟...');
+  try {
+    const resp = await fetch(`${API_BASE}/api/lstm/train`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({years: [2015,2016,2017,2018,2019,2020,2021,2022,2023,2024], epochs: 80})
+    });
+    const result = await resp.json();
+    hideLoading();
+    if (result.success) {
+      showToast(`LSTM训练成功！${result.message}`);
+      checkLSTMStatus();
+    } else {
+      showToast('训练失败: ' + (result.error || '未知错误'), true);
+      if (result.suggestion) {
+        showToast(result.suggestion, true);
+      }
+    }
+  } catch(e) {
+    hideLoading();
+    showToast('训练请求失败: ' + e.message, true);
+  }
+}
+
+async function loadAndRenderPrediction(tfbh, hours, method) {
+  const data = await apiCall(`/api/typhoons/predict/${tfbh}?hours=${hours}&method=${method}`);
+  if (!data || !data.predictions) return;
+
+  // 清除之前的预测图层
+  predictionLayers.forEach(l => map.removeLayer(l));
+  predictionLayers = [];
+
+  const predContainer = document.getElementById('predictionResults');
+  if (!predContainer) return;
+
+  let html = '';
+
+  // 渲染每种预测方法的结果
+  for (const [methodKey, points] of Object.entries(data.predictions)) {
+    if (methodKey.startsWith('forecast_')) continue; // 机构预报单独处理
+    if (!points || !points.length) continue;
+
+    const color = PRED_COLORS[methodKey] || '#888';
+    const label = methodKey === 'trend' ? '趋势外推' : methodKey === 'physics' ? '物理模型' : methodKey === 'ensemble' ? 'Kalman融合' : methodKey === 'gfs' ? 'GFS数值预报' : methodKey === 'aifs' ? 'ECMWF AIFS' : methodKey === 'cma' ? 'CMA GRAPES' : methodKey === 'gfs_graphcast' ? 'GraphCast AI' : methodKey === 'analog' ? '历史类比' : methodKey === 'lstm' ? 'LSTM深度学习' : methodKey === 'pangu' ? '盘古大模型' : methodKey;
+
+    // 绘制预测路径
+    const coords = [[data.base_lat, data.base_lng]];
+    for (const p of points) {
+      coords.push([p.lat, p.lng]);
+    }
+
+    const line = L.polyline(coords, {
+      color: color,
+      weight: methodKey === 'ensemble' ? 4 : 2,
+      opacity: methodKey === 'ensemble' ? 0.9 : 0.6,
+      dashArray: methodKey === 'ensemble' ? '' : '6, 4',
+    }).addTo(map);
+    predictionLayers.push(line);
+
+    // 预测点标记
+    for (const p of points) {
+      const marker = L.circleMarker([p.lat, p.lng], {
+        radius: methodKey === 'ensemble' ? 5 : 3,
+        fillColor: color,
+        fillOpacity: 0.8,
+        color: '#fff',
+        weight: 1,
+      }).addTo(map);
+      marker.bindTooltip(`
+        <div style="font-size:12px">
+          <strong>[${label}预测]</strong><br>
+          ${p.time ? p.time.slice(0,16) : ''}<br>
+          ${p.lat}°N, ${p.lng}°E<br>
+          气压: ${p.pressure || '-'} hPa<br>
+          风速: ${p.wind_speed || '-'} m/s<br>
+          置信度: ${(p.confidence * 100).toFixed(0)}%
+        </div>
+      `);
+      predictionLayers.push(marker);
+    }
+
+    // 不确定性区域（综合预测时显示）
+    if (methodKey === 'ensemble' && points.length > 1) {
+      const tPoints = data.predictions['trend'];
+      const pPoints = data.predictions['physics'];
+      if (tPoints && pPoints && tPoints.length === pPoints.length) {
+        // 绘制趋势和物理之间的区域表示不确定性
+        const upperCoords = [[data.base_lat, data.base_lng]];
+        const lowerCoords = [[data.base_lat, data.base_lng]];
+        for (let i = 0; i < Math.min(tPoints.length, pPoints.length); i++) {
+          upperCoords.push([tPoints[i].lat, tPoints[i].lng]);
+          lowerCoords.push([pPoints[i].lat, pPoints[i].lng]);
+        }
+        const areaCoords = [...upperCoords, ...lowerCoords.reverse()];
+        const area = L.polygon(areaCoords, {
+          color: color,
+          fillColor: color,
+          fillOpacity: 0.08,
+          weight: 0,
+        }).addTo(map);
+        predictionLayers.push(area);
+      }
+    }
+
+    // 详情表格
+    html += `
+      <div style="margin-bottom:12px">
+        <div style="font-size:12px;color:${color};font-weight:600;margin-bottom:4px">
+          <i class="fas fa-chart-line"></i> ${label}预测 (${points.length}个点)
+        </div>
+        <table class="pred-table">
+          <tr><th>时间</th><th>位置</th><th>气压</th><th>风速</th><th>等级</th><th>置信度</th></tr>
+          ${points.slice(0, 6).map(p => `
+            <tr>
+              <td>${p.time ? p.time.slice(11,16) : '-'}</td>
+              <td>${p.lat}°N, ${p.lng}°E</td>
+              <td>${p.pressure || '-'} hPa</td>
+              <td>${p.wind_speed || '-'} m/s</td>
+              <td style="color:${CATEGORY_COLORS[p.category]||'#fff'}">${p.category || '-'}</td>
+              <td>
+                <div class="pred-confidence">
+                  <div class="pred-confidence-bar" style="width:${(p.confidence*100).toFixed(0)}%;background:${p.confidence>0.6?'var(--accent-green)':p.confidence>0.4?'var(--accent-orange)':'var(--accent-red)'}"></div>
+                </div>
+                ${(p.confidence*100).toFixed(0)}%
+              </td>
+            </tr>
+          `).join('')}
+        </table>
+      </div>`;
+  }
+
+  // 基准信息
+  html += `
+    <div style="font-size:11px;color:var(--text-muted);margin-top:8px">
+      预测基准: ${data.base_time ? data.base_time.slice(0,16) : '-'} |
+      位置: ${data.base_lat}°N, ${data.base_lng}°E |
+      综合置信度: ${(data.confidence * 100).toFixed(0)}%
+    </div>`;
+
+  predContainer.innerHTML = html;
+}
+
+// ============================================================
+// 地图控制
+// ============================================================
+function togglePredictionLayers() {
+  showPrediction = !showPrediction;
+  predictionLayers.forEach(l => {
+    if (showPrediction) l.addTo(map);
+    else map.removeLayer(l);
+  });
+  showToast(showPrediction ? '显示预测图层' : '隐藏预测图层');
+}
+
+function toggleWindRadius() {
+  showWindRadius = !showWindRadius;
+  windRadiusLayers.forEach(l => {
+    if (showWindRadius) l.addTo(map);
+    else map.removeLayer(l);
+  });
+  if (showWindRadius && selectedTyphoon) {
+    const t = currentTyphoons.find(t => t.id === selectedTyphoon);
+    if (t) renderWindRadius(t);
+  }
+  showToast(showWindRadius ? '显示风圈范围' : '隐藏风圈范围');
+}
+
+function centerOnTyphoon() {
+  if (!selectedTyphoon) return;
+  const t = currentTyphoons.find(t => t.id === selectedTyphoon);
+  if (t && t.points && t.points.length) {
+    const last = t.points[t.points.length - 1];
+    map.setView([last.lat, last.lng], 6);
+  }
+}
+
+function resetMapView() {
+  map.setView([20, 130], 4);
+}
+
+// ============================================================
+// 启动
+// ============================================================
+initApp();
+</script>
+</body>
+</html>
