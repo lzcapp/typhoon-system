@@ -14,8 +14,9 @@ services:
       - ./data:/app/data
       # 持久化模型权重（LSTM + Pangu ONNX）
       - ./models:/app/backend/models
-      # 持久化静态文件（可自定义前端）
-      - ./static:/app/static
+      # ⚠️ 不要挂载 ./static:/app/static！会覆盖镜像内置的 index.html 导致 404
+      # 如果需要自定义前端，先确保 ./static/index.html 存在再取消注释：
+      # - ./static:/app/static
     environment:
       - TZ=Asia/Shanghai
       - PYTHONUNBUFFERED=1

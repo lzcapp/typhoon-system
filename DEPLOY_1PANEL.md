@@ -16,7 +16,7 @@
 ### 第 1 步：创建目录
 
 ```bash
-mkdir -p /opt/typhoon-system/data /opt/typhoon-system/models /opt/typhoon-system/static
+mkdir -p /opt/typhoon-system/data /opt/typhoon-system/models
 ```
 
 ### 第 2 步：在 1Panel 中创建编排
@@ -42,7 +42,7 @@ services:
     volumes:
       - /opt/typhoon-system/data:/app/data
       - /opt/typhoon-system/models:/app/backend/models
-      - /opt/typhoon-system/static:/app/static
+      # ⚠️ 不要挂载 static！镜像已内置 index.html，挂载空目录会覆盖导致 404
     environment:
       - TZ=Asia/Shanghai
       - PYTHONUNBUFFERED=1
