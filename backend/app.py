@@ -294,32 +294,38 @@ class TyphoonPredictor:
         if method in ['physics', 'ensemble', 'all']:
             predictions['physics'] = TyphoonPredictor._physics_model(points, hours)
 
-        # 3. GFS数值预报引导气流法 (通过Open-Meteo免费API)
+        # 3. GFS涡旋追踪（MSLP气压场最低中心）- ensemble只调用GFS+ECMWF减少API压力
         if method in ['gfs', 'ensemble', 'all']:
-            gfs_pred = TyphoonPredictor._gfs_steering_prediction(last_point, hours)
+            gfs_pred = TyphoonPredictor._nwp_vortex_track(last_point, hours, model='gfs', model_label='GFS')
             if gfs_pred:
                 predictions['gfs'] = gfs_pred
 
-        # 4. GFS GraphCast AI预报 (DeepMind AI天气模型)
+        # 3b. ECMWF IFS涡旋追踪（欧洲中心确定性预报，全球最准NWP之一）
+        if method in ['ecmwf', 'ensemble', 'all']:
+            ecmwf_pred = TyphoonPredictor._nwp_vortex_track(last_point, hours, model='ecmwf_ifs04', model_label='ECMWF IFS')
+            if ecmwf_pred:
+                predictions['ecmwf'] = ecmwf_pred
+
+        # 4. GraphCast AI预报（仅单独调用时使用）
         if method in ['gfs_graphcast', 'all']:
             gc_pred = TyphoonPredictor._gfs_graphcast_prediction(last_point, hours)
             if gc_pred:
                 predictions['gfs_graphcast'] = gc_pred
 
-        # 4b. ECMWF AIFS AI预报系统 (ECMWF宣称超越GraphCast)
-        if method in ['aifs', 'ensemble', 'all']:
-            aifs_pred = TyphoonPredictor._aifs_prediction(last_point, hours)
+        # 4b. ECMWF AIFS AI预报系统（仅单独调用时使用）
+        if method in ['aifs', 'all']:
+            aifs_pred = TyphoonPredictor._nwp_vortex_track(last_point, hours, model='aifs', model_label='AIFS')
             if aifs_pred:
                 predictions['aifs'] = aifs_pred
 
-        # 4c. CMA GRAPES 中国气象局预报
-        if method in ['cma', 'ensemble', 'all']:
-            cma_pred = TyphoonPredictor._cma_prediction(last_point, hours)
+        # 4c. CMA GRAPES涡旋追踪（仅单独调用时使用）
+        if method in ['cma', 'all']:
+            cma_pred = TyphoonPredictor._nwp_vortex_track(last_point, hours, model='cma_grapes_global', model_label='CMA GRAPES')
             if cma_pred:
                 predictions['cma'] = cma_pred
 
-        # 5. 历史相似路径类比法
-        if method in ['analog', 'ensemble', 'all']:
+        # 5. 历史相似路径类比法（仅单独调用或all时使用，ensemble跳过以避免慢速历史搜索）
+        if method in ['analog', 'all']:
             analog_pred = TyphoonPredictor._analog_prediction(typhoon_data, hours)
             if analog_pred:
                 predictions['analog'] = analog_pred
@@ -336,7 +342,13 @@ class TyphoonPredictor:
             if pangu_pred:
                 predictions['pangu'] = pangu_pred
 
-        # 综合融合 (Kalman滤波加权)
+        # ★ 关键：在ensemble融合之前，先纳入机构预报
+        # 否则_kalman_ensemble看不到任何forecast_*数据，机构锚定完全失效
+        if typhoon_data.get('forecasts'):
+            for agency, fc_data in typhoon_data['forecasts'].items():
+                predictions[f'forecast_{agency}'] = fc_data['points']
+
+        # 综合融合 (Kalman滤波加权，含机构预报锚定)
         if method == 'ensemble' and len(predictions) >= 2:
             ensemble_pred = TyphoonPredictor._kalman_ensemble(predictions, hours, last_point)
             if ensemble_pred:
@@ -346,11 +358,6 @@ class TyphoonPredictor:
             ensemble_pred = TyphoonPredictor._kalman_ensemble(predictions, hours, last_point)
             if ensemble_pred:
                 predictions['ensemble'] = ensemble_pred
-
-        # 如果有机构预报，也纳入
-        if typhoon_data.get('forecasts'):
-            for agency, fc_data in typhoon_data['forecasts'].items():
-                predictions[f'forecast_{agency}'] = fc_data['points']
 
         return {
             'typhoon_id': typhoon_data.get('id', ''),
@@ -526,6 +533,186 @@ class TyphoonPredictor:
                 'confidence': round(0.92 * decay, 2),
                 'method_desc': '基于GFS 500/700hPa引导气流',
             })
+
+        return predictions if predictions else None
+
+    # ============================================================
+    # 方法3b: NWP涡旋追踪法（替代单点引导气流法）
+    # ============================================================
+    @staticmethod
+    def _nwp_vortex_track(last_point, hours, model='gfs', model_label='GFS'):
+        """NWP涡旋追踪：查询模型MSLP气压场网格，追踪最低气压中心位置。
+        这是业务预报中追踪台风的标准方法——不是查一个点的风来推方向，
+        而是直接看模型预报的气压场中低压中心在哪里。
+
+        model: 'gfs', 'ecmwf_ifs04', 'cma_grapes_global', 'aifs'
+        """
+        lat = last_point.get('lat', 0)
+        lng = last_point.get('lng', 0)
+        if lat == 0 and lng == 0:
+            return None
+
+        # 构建查询网格：以台风为中心，±3度范围，步长3度 = 3x3网格
+        grid_size = 3  # ±3度
+        grid_step = 3  # 3度间距
+        lats_grid = []
+        lngs_grid = []
+        for dlat in range(-grid_size, grid_size + 1, grid_step):
+            for dlng in range(-grid_size, grid_size + 1, grid_step):
+                lats_grid.append(round(lat + dlat, 1))
+                lngs_grid.append(round(lng + dlng, 1))
+
+        # Open-Meteo支持多位置查询（逗号分隔）
+        lat_str = ','.join(str(l) for l in lats_grid)
+        lng_str = ','.join(str(l) for l in lngs_grid)
+        forecast_days = min(hours // 24 + 1, 16)
+
+        # 构建API URL
+        if model == 'gfs':
+            base_url = 'https://api.open-meteo.com/v1/gfs'
+            model_param = ''
+        else:
+            base_url = 'https://api.open-meteo.com/v1/forecast'
+            model_param = f'&models={model}'
+
+        url = (
+            f'{base_url}?latitude={lat_str}&longitude={lng_str}'
+            f'&hourly=pressure_msl'
+            f'{model_param}'
+            f'&forecast_days={forecast_days}'
+            f'&cell_selection=nearest'
+            f'&timeformat=iso8601'
+        )
+
+        try:
+            response = req_lib.get(url, timeout=20)
+            if response.status_code != 200:
+                print(f"NWP vortex track API error ({model_label}): {response.status_code}")
+                return None
+            data = response.json()
+        except Exception as e:
+            print(f"NWP vortex track error ({model_label}): {e}")
+            return None
+
+        # Open-Meteo返回多位置数据为list
+        if not isinstance(data, list):
+            data = [data]
+
+        if len(data) != len(lats_grid):
+            print(f"NWP vortex track: grid mismatch {len(data)} vs {len(lats_grid)}")
+            return None
+
+        # 提取每个网格点的时间序列
+        grid_data = []
+        for i, loc_data in enumerate(data):
+            hourly = loc_data.get('hourly', {})
+            times = hourly.get('time', [])
+            pressures = hourly.get('pressure_msl', [])
+            grid_data.append({
+                'lat': lats_grid[i],
+                'lng': lngs_grid[i],
+                'times': times,
+                'pressures': pressures,
+            })
+
+        if not grid_data or not grid_data[0]['times']:
+            return None
+
+        try:
+            base_time = datetime.fromisoformat(last_point['time'].replace('Z', '+00:00'))
+        except:
+            base_time = datetime.now()
+
+        # 找到基准时间索引
+        times = grid_data[0]['times']
+        base_idx = 0
+        for i, t in enumerate(times):
+            try:
+                ht = datetime.fromisoformat(t)
+                if ht >= base_time:
+                    base_idx = i
+                    break
+            except:
+                continue
+
+        # 在每个预报时刻用气压加权质心法追踪台风中心
+        # 不只取最低气压点（粗网格下会卡住），而是用所有低气压点加权平均
+        dt = 6
+        predictions = []
+        prev_lat = lat
+        prev_lng = lng
+        last_pressure = last_point.get('pressure', 1000)
+
+        for step in range(1, hours // dt + 1):
+            target_idx = base_idx + step * dt
+            if target_idx >= len(times):
+                break
+
+            # 收集所有网格点的气压值
+            grid_pressures = []
+            for gd in grid_data:
+                if target_idx < len(gd['pressures']) and gd['pressures'][target_idx] is not None:
+                    p = gd['pressures'][target_idx]
+                    dist = math.sqrt((gd['lat'] - prev_lat)**2 + (gd['lng'] - prev_lng)**2)
+                    if dist <= 8:  # 限制搜索范围
+                        grid_pressures.append({
+                            'lat': gd['lat'],
+                            'lng': gd['lng'],
+                            'pressure': p,
+                            'dist': dist,
+                        })
+
+            if not grid_pressures:
+                break
+
+            # 找最低气压
+            min_p = min(g['pressure'] for g in grid_pressures)
+
+            # 气压加权质心：气压越低权重越大
+            # w = (1015 - p)^2 / (dist + 0.5)
+            # 这样低气压点权重高，且离上一个位置近的点权重高
+            weighted_lat = 0
+            weighted_lng = 0
+            weight_sum = 0
+
+            for g in grid_pressures:
+                dp = 1015 - g['pressure']
+                if dp > 0:
+                    w = dp * dp / (g['dist'] + 0.5)
+                    weighted_lat += g['lat'] * w
+                    weighted_lng += g['lng'] * w
+                    weight_sum += w
+
+            if weight_sum > 0:
+                pred_lat = weighted_lat / weight_sum
+                pred_lng = weighted_lng / weight_sum
+            else:
+                # 所有气压都>=1015，用最低气压点
+                min_g = min(grid_pressures, key=lambda x: x['pressure'])
+                pred_lat = min_g['lat']
+                pred_lng = min_g['lng']
+
+            pred_pressure = min_p
+            pred_wind = TyphoonPredictor._pressure_to_wind(pred_pressure)
+
+            h = step * dt
+            decay = math.exp(-h / (hours * 2.5))
+            pred_time = (base_time + timedelta(hours=h)).isoformat()
+
+            predictions.append({
+                'time': pred_time,
+                'lat': round(pred_lat, 1),
+                'lng': round(pred_lng, 1),
+                'pressure': round(pred_pressure),
+                'wind_speed': round(pred_wind, 1),
+                'category': TyphoonPredictor._intensity_category(pred_pressure, pred_wind),
+                'confidence': round(0.90 * decay, 2),
+                'method_desc': f'{model_label}涡旋追踪(气压加权质心)',
+            })
+
+            prev_lat = pred_lat
+            prev_lng = pred_lng
+            last_pressure = pred_pressure
 
         return predictions if predictions else None
 
@@ -1196,46 +1383,54 @@ class TyphoonPredictor:
         return result
 
     # ============================================================
-    # 方法8: Kalman滤波多方法融合
+    # 方法8: Kalman滤波多方法融合（含机构预报锚定）
     # ============================================================
     @staticmethod
     def _kalman_ensemble(predictions, hours, last_point):
         """Kalman滤波器融合所有预测方法的结果
-        - 动态调整各方法权重
-        - 量化不确定性（通过预测散度）
-        - 近期偏向观测一致性，远期偏向物理一致性"""
+        核心策略：
+        1. 机构预报共识作为主线锚点（权重自适应）
+        2. AI/NWP方法仅在共识方向上做有限修正
+        3. 异常值剔除：偏离共识过远的AI方法权重骤降
+        4. 无机构预报时退化为AI方法加权平均"""
 
-        method_names = [k for k in predictions.keys() if not k.startswith('forecast_')]
-        if len(method_names) < 2:
+        # 分离机构预报和AI方法
+        all_methods = list(predictions.keys())
+        agency_methods = [k for k in all_methods if k.startswith('forecast_')]
+        ai_methods = [k for k in all_methods if not k.startswith('forecast_') and k != 'ensemble']
+
+        if not ai_methods and not agency_methods:
             return None
 
-        # 初始权重：根据方法可信度分配
-        initial_weights = {
-            'pangu': 0.35,             # Pangu-Weather盘古大模型（如果可用）
-            'aifs': 0.25,             # ECMWF AIFS AI预报，超越GraphCast
-            'lstm': 0.20,             # LSTM深度学习
-            'cma': 0.10,              # CMA GRAPES，中国气象局
-            'gfs': 0.08,              # GFS权威NWP
-            'gfs_graphcast': 0.05,    # GraphCast AI
-            'analog': 0.03,           # 历史类比
-            'physics': 0.02,          # 物理模型
-            'trend': 0.01,            # 趋势外推
+        # 自适应机构权重：机构越多，每家权重适当降低但总权重提高
+        n_agencies = len(agency_methods)
+        if n_agencies >= 5:
+            agency_weight_each = 0.14   # 5-6家: 总0.70~0.84
+        elif n_agencies >= 3:
+            agency_weight_each = 0.18   # 3-4家: 总0.54~0.72
+        elif n_agencies >= 1:
+            agency_weight_each = 0.25   # 1-2家: 总0.25~0.50
+        else:
+            agency_weight_each = 0.0    # 无机构预报
+
+        # AI方法权重（仅在机构预报总权重之外分配）
+        ai_weights = {
+            'pangu': 0.08,
+            'ecmwf': 0.06,      # ECMWF IFS涡旋追踪
+            'aifs': 0.04,        # ECMWF AIFS AI
+            'lstm': 0.04,        # LSTM深度学习
+            'gfs': 0.02,         # GFS涡旋追踪
+            'cma': 0.015,        # CMA GRAPES涡旋追踪
+            'gfs_graphcast': 0.01,
+            'analog': 0.01,
+            'physics': 0.005,
+            'trend': 0.005,
         }
 
-        # Kalman状态：[lat, lng, pressure, wind_speed, v_lat, v_lng]
-        # 初始状态从最后一个观测点
-        x = [
-            last_point.get('lat', 0),
-            last_point.get('lng', 0),
-            last_point.get('pressure', 1000),
-            last_point.get('wind_speed', 0),
-            0, 0  # 速度分量会在第一步估算
-        ]
+        # 异常值剔除阈值：偏离机构共识超过此距离(度)的AI方法权重降为1/10
+        OUTLIER_THRESHOLD_DEG = 5.0   # ~550km
+        OUTLIER_PENALTY = 0.1          # 异常方法权重保留比例
 
-        # 简化Kalman：用协方差矩阵跟踪不确定性
-        P = [0.1, 0.1, 5, 2, 0.05, 0.05]  # 初始不确定性
-
-        # 预测步长
         dt = 6
         results = []
 
@@ -1244,40 +1439,78 @@ class TyphoonPredictor:
         except:
             base_time = datetime.now()
 
+        # 预处理：将机构预报插值到6h步长
+        agency_interpolated = {}
+        for am in agency_methods:
+            raw_pts = predictions.get(am, [])
+            if not raw_pts:
+                continue
+            interpolated = TyphoonPredictor._interpolate_forecast(raw_pts, base_time, hours, dt, last_point)
+            if interpolated:
+                agency_interpolated[am] = interpolated
+
         for step in range(1, hours // dt + 1):
             h = step * dt
             time_decay = math.exp(-h / (hours * 2.5))
 
-            # 各方法对当前时刻的预测
+            # 收集当前时刻各方法的预测
             method_preds = {}
-            for method in method_names:
+
+            # AI方法（6h步长，直接取idx）
+            for method in ai_methods:
                 preds = predictions.get(method, [])
-                idx = step - 1  # 对应第step个预测点
+                idx = step - 1
                 if idx < len(preds):
                     method_preds[method] = preds[idx]
+
+            # 机构预报（已插值到6h步长）
+            for am, interp_pts in agency_interpolated.items():
+                idx = step - 1
+                if idx < len(interp_pts):
+                    method_preds[am] = interp_pts[idx]
 
             if not method_preds:
                 break
 
-            # 计算各方法加权平均
+            # ★ 计算机构共识（所有可用机构预报的平均位置）
+            agency_pts = [method_preds[m] for m in method_preds if m.startswith('forecast_')]
+            if agency_pts:
+                consensus_lat = sum(p['lat'] for p in agency_pts) / len(agency_pts)
+                consensus_lng = sum(p['lng'] for p in agency_pts) / len(agency_pts)
+            else:
+                consensus_lat = consensus_lng = None
+
+            # 加权平均（含异常值剔除）
             total_weight = 0
             weighted_lat = 0
             weighted_lng = 0
             weighted_pressure = 0
             weighted_wind = 0
+            outlier_methods = []
 
             for method, pred in method_preds.items():
-                # 权重随时间动态调整
-                base_w = initial_weights.get(method, 0.02)
-                # Pangu/AIFS/LSTM/GFS/CMA在远期更可靠
-                if method in ['pangu', 'aifs', 'lstm', 'gfs', 'cma', 'gfs_graphcast']:
-                    w = base_w * (1 + 0.3 * (1 - time_decay))
-                elif method in ['trend']:
-                    w = base_w * time_decay
-                elif method in ['analog']:
-                    w = base_w * (1 + 0.2 * time_decay)
+                if method.startswith('forecast_'):
+                    # 机构预报：高权重
+                    w = agency_weight_each
                 else:
-                    w = base_w
+                    base_w = ai_weights.get(method, 0.005)
+                    # 趋势在短期更准
+                    if method == 'trend':
+                        w = base_w * (1 + 2.0 * time_decay)
+                    elif method in ['lstm', 'analog']:
+                        w = base_w * (1 + 0.5 * time_decay)
+                    else:
+                        w = base_w
+
+                    # ★ 异常值检测：偏离机构共识过远的AI方法权重骤降
+                    if consensus_lat is not None:
+                        dist_to_consensus = math.sqrt(
+                            (pred['lat'] - consensus_lat) ** 2 +
+                            (pred['lng'] - consensus_lng) ** 2
+                        )
+                        if dist_to_consensus > OUTLIER_THRESHOLD_DEG:
+                            w *= OUTLIER_PENALTY
+                            outlier_methods.append(method)
 
                 weighted_lat += pred['lat'] * w
                 weighted_lng += pred['lng'] * w
@@ -1293,67 +1526,153 @@ class TyphoonPredictor:
             pred_pressure = weighted_pressure / total_weight
             pred_wind = weighted_wind / total_weight
 
-            # Kalman更新：观测=各方法加权结果
-            # 预测=上一状态+速度
-            innovation_lat = pred_lat - x[0]
-            innovation_lng = pred_lng - x[1]
-
-            # 更新速度估计
-            x[4] = innovation_lat / dt
-            x[5] = innovation_lng / dt
-
-            # Kalman增益（简化）
-            K_lat = P[0] / (P[0] + 0.1)
-            K_lng = P[1] / (P[1] + 0.1)
-
-            x[0] += K_lat * innovation_lat
-            x[1] += K_lng * innovation_lng
-            x[2] = pred_pressure
-            x[3] = pred_wind
-
-            # 更新协方差
-            P[0] *= (1 - K_lat) + 0.02
-            P[1] *= (1 - K_lng) + 0.02
-            P[2] += 0.5 * time_decay
-            P[3] += 0.2 * time_decay
-
-            # 计算散度（各方法间的差异）作为不确定性指标
-            if len(method_preds) >= 2:
+            # 计算散度（仅基于机构预报，更稳定）
+            if len(agency_pts) >= 2:
+                lats = [p['lat'] for p in agency_pts]
+                lngs = [p['lng'] for p in agency_pts]
+                lat_std = math.sqrt(sum((l - consensus_lat) ** 2 for l in lats) / len(lats))
+                lng_std = math.sqrt(sum((l - consensus_lng) ** 2 for l in lngs) / len(lngs))
+                spread = math.sqrt(lat_std ** 2 + lng_std ** 2)
+            elif len(method_preds) >= 2:
                 lats = [p['lat'] for p in method_preds.values()]
                 lngs = [p['lng'] for p in method_preds.values()]
-                lat_std = math.sqrt(sum((l - pred_lat)**2 for l in lats) / len(lats))
-                lng_std = math.sqrt(sum((l - pred_lng)**2 for l in lngs) / len(lngs))
-                spread = math.sqrt(lat_std**2 + lng_std**2)
+                lat_std = math.sqrt(sum((l - pred_lat) ** 2 for l in lats) / len(lats))
+                lng_std = math.sqrt(sum((l - pred_lng) ** 2 for l in lngs) / len(lngs))
+                spread = math.sqrt(lat_std ** 2 + lng_std ** 2)
             else:
                 spread = 0
+                lat_std = lng_std = 0
 
-            # 置信度：基于散度和时间衰减
-            confidence = round(max(0.1, 0.95 * time_decay * math.exp(-spread / 3)), 2)
+            # 置信度：机构一致性高→高置信度
+            agency_count = len(agency_pts)
+            agency_bonus = min(agency_count * 0.05, 0.15)
+            confidence = round(max(0.1, (0.80 + agency_bonus) * time_decay * math.exp(-spread / 5)), 2)
 
             pred_time = (base_time + timedelta(hours=h)).isoformat()
 
+            desc_parts = [f'Kalman融合({len(method_preds)}种方法,含{agency_count}家机构)']
+            if outlier_methods:
+                desc_parts.append(f'剔除异常: {",".join(outlier_methods)}')
+
             result = {
                 'time': pred_time,
-                'lat': round(x[0], 1),
-                'lng': round(x[1], 1),
-                'pressure': round(x[2]),
-                'wind_speed': round(x[3], 1),
-                'category': TyphoonPredictor._intensity_category(x[2], x[3]),
+                'lat': round(pred_lat, 1),
+                'lng': round(pred_lng, 1),
+                'pressure': round(pred_pressure),
+                'wind_speed': round(pred_wind, 1),
+                'category': TyphoonPredictor._intensity_category(pred_pressure, pred_wind),
                 'confidence': confidence,
-                'method_desc': f'Kalman融合({len(method_preds)}种方法)',
-                'spread_lat': round(lat_std, 2) if len(method_preds) >= 2 else 0,
-                'spread_lng': round(lng_std, 2) if len(method_preds) >= 2 else 0,
+                'method_desc': '; '.join(desc_parts),
+                'spread_lat': round(lat_std, 2),
+                'spread_lng': round(lng_std, 2),
                 'methods_used': list(method_preds.keys()),
             }
-
-            # 如果有各方法的原始值，记录
-            for method, pred in method_preds.items():
-                result[f'{method}_lat'] = pred['lat']
-                result[f'{method}_lng'] = pred['lng']
 
             results.append(result)
 
         return results if results else None
+
+    @staticmethod
+    def _interpolate_forecast(forecast_points, base_time, total_hours, dt, base_point=None):
+        """将机构预报点（通常12h/24h间隔）线性插值到dt步长
+        base_point: 最后观测点，用于在第一个预报点之前做插值"""
+        if not forecast_points:
+            return []
+
+        # 解析机构预报的时间和位置
+        parsed = []
+        for p in forecast_points:
+            try:
+                t = datetime.fromisoformat(p['time'].replace('Z', '+00:00'))
+                parsed.append({
+                    'time': t,
+                    'lat': float(p['lat'] or 0),
+                    'lng': float(p['lng'] or 0),
+                    'pressure': float(p.get('pressure') or 1000),
+                    'wind_speed': float(p.get('wind_speed') or 0),
+                })
+            except:
+                continue
+
+        if not parsed:
+            return []
+
+        parsed.sort(key=lambda x: x['time'])
+
+        # ★ 在预报点序列前面插入当前观测点，使插值从0h开始正确过渡
+        if base_point is not None:
+            base_pt = {
+                'time': base_time,
+                'lat': float(base_point.get('lat', 0) or 0),
+                'lng': float(base_point.get('lng', 0) or 0),
+                'pressure': float(base_point.get('pressure', 1000) or 1000),
+                'wind_speed': float(base_point.get('wind_speed', 0) or 0),
+            }
+            # 如果第一个预报点晚于base_time，在前面插入观测点
+            if parsed[0]['time'] > base_time:
+                parsed.insert(0, base_pt)
+
+        # 生成dt步长的插值点
+        result = []
+        for h in range(dt, total_hours + 1, dt):
+            target_time = base_time + timedelta(hours=h)
+
+            # 如果在机构预报范围内，线性插值
+            if target_time <= parsed[-1]['time']:
+                # 找到包围target_time的两个点
+                for i in range(len(parsed) - 1):
+                    if parsed[i]['time'] <= target_time <= parsed[i+1]['time']:
+                        t0 = parsed[i]['time']
+                        t1 = parsed[i+1]['time']
+                        if t1 == t0:
+                            ratio = 0
+                        else:
+                            ratio = (target_time - t0).total_seconds() / (t1 - t0).total_seconds()
+
+                        result.append({
+                            'lat': parsed[i]['lat'] + (parsed[i+1]['lat'] - parsed[i]['lat']) * ratio,
+                            'lng': parsed[i]['lng'] + (parsed[i+1]['lng'] - parsed[i]['lng']) * ratio,
+                            'pressure': parsed[i]['pressure'] + (parsed[i+1]['pressure'] - parsed[i]['pressure']) * ratio,
+                            'wind_speed': parsed[i]['wind_speed'] + (parsed[i+1]['wind_speed'] - parsed[i]['wind_speed']) * ratio,
+                        })
+                        break
+                else:
+                    # target_time在第一个点之前
+                    result.append({
+                        'lat': parsed[0]['lat'],
+                        'lng': parsed[0]['lng'],
+                        'pressure': parsed[0]['pressure'],
+                        'wind_speed': parsed[0]['wind_speed'],
+                    })
+            else:
+                # 超出机构预报范围：用最后两个点的外推
+                if len(parsed) >= 2:
+                    t0 = parsed[-2]['time']
+                    t1 = parsed[-1]['time']
+                    if t1 > t0:
+                        ratio = (target_time - t1).total_seconds() / (t1 - t0).total_seconds()
+                        result.append({
+                            'lat': parsed[-1]['lat'] + (parsed[-1]['lat'] - parsed[-2]['lat']) * ratio,
+                            'lng': parsed[-1]['lng'] + (parsed[-1]['lng'] - parsed[-2]['lng']) * ratio,
+                            'pressure': parsed[-1]['pressure'],
+                            'wind_speed': parsed[-1]['wind_speed'],
+                        })
+                    else:
+                        result.append({
+                            'lat': parsed[-1]['lat'],
+                            'lng': parsed[-1]['lng'],
+                            'pressure': parsed[-1]['pressure'],
+                            'wind_speed': parsed[-1]['wind_speed'],
+                        })
+                else:
+                    result.append({
+                        'lat': parsed[-1]['lat'],
+                        'lng': parsed[-1]['lng'],
+                        'pressure': parsed[-1]['pressure'],
+                        'wind_speed': parsed[-1]['wind_speed'],
+                    })
+
+        return result
 
     @staticmethod
     def _trend_extrapolation(points, hours):
@@ -1414,9 +1733,13 @@ class TyphoonPredictor:
         dt = 6  # 每6小时一个预测点
 
         for h in range(dt, hours + 1, dt):
-            decay = math.exp(-h / (hours * 1.5))  # 衰减因子，远期预测不确定性增大
-            pred_lat = last_point['lat'] + avg_lat_rate * h * decay + accel_lat * h * decay * 0.5
-            pred_lng = last_point['lng'] + avg_lng_rate * h * decay + accel_lng * h * decay * 0.5
+            # 置信度衰减因子：仅影响confidence，不影响位置
+            # 台风不会因为预测久了就减速停下！
+            decay = math.exp(-h / (hours * 1.5))
+
+            # 线性外推：速度 * 时间，不衰减
+            pred_lat = last_point['lat'] + avg_lat_rate * h + accel_lat * h * 0.5
+            pred_lng = last_point['lng'] + avg_lng_rate * h + accel_lng * h * 0.5
 
             # 压力和风速趋势预测
             recent_pressures = [p.get('pressure', 0) for p in recent if p.get('pressure')]
@@ -1426,10 +1749,10 @@ class TyphoonPredictor:
             pred_wind = last_point.get('wind_speed', 0)
             if len(recent_pressures) >= 2:
                 p_rate = (recent_pressures[-1] - recent_pressures[0]) / max(len(recent_pressures)-1, 1)
-                pred_pressure = last_point.get('pressure', 0) + p_rate * (h / dt) * decay
+                pred_pressure = last_point.get('pressure', 0) + p_rate * h
             if len(recent_winds) >= 2:
                 w_rate = (recent_winds[-1] - recent_winds[0]) / max(len(recent_winds)-1, 1)
-                pred_wind = last_point.get('wind_speed', 0) + w_rate * (h / dt) * decay
+                pred_wind = last_point.get('wind_speed', 0) + w_rate * h
 
             try:
                 base_time = datetime.fromisoformat(last_point['time'].replace('Z', '+00:00'))
@@ -1499,12 +1822,12 @@ class TyphoonPredictor:
         current_wind = last.get('wind_speed', 0)
 
         for h in range(dt, hours + 1, dt):
-            # 衰减系数
+            # 置信度衰减，不影响位置计算
             decay = math.exp(-h / (hours * 2))
 
-            # 预测位置: 引导气流 + beta漂移 + 衰减修正
-            pred_lat = current_lat + (move_lat * 2 + beta_n) * dt * decay
-            pred_lng = current_lng + (move_lng * 2 - beta_w) * dt * decay
+            # 预测位置: 引导气流 + beta漂移（线性外推，不衰减）
+            pred_lat = current_lat + (move_lat * 2 + beta_n) * dt
+            pred_lng = current_lng + (move_lng * 2 - beta_w) * dt
 
             # 当台风接近陆地或高纬度时，偏向东北转向
             if pred_lat > 25:
@@ -1515,11 +1838,11 @@ class TyphoonPredictor:
             # 海上台风增强，登陆后减弱
             is_over_ocean = pred_lng > 105 and pred_lat < 35
             if is_over_ocean:
-                pressure_change = -2 * dt * decay  # 继续降低气压
-                wind_change = 3 * dt * decay
+                pressure_change = -2 * dt  # 继续降低气压
+                wind_change = 3 * dt
             else:
-                pressure_change = 8 * dt * decay  # 气压升高（减弱）
-                wind_change = -5 * dt * decay
+                pressure_change = 8 * dt  # 气压升高（减弱）
+                wind_change = -5 * dt
 
             current_pressure = current_pressure + pressure_change
             current_wind = max(0, current_wind + wind_change)
@@ -1682,16 +2005,17 @@ def predict_typhoon(tfbh):
     hours = request.args.get('hours', 72, type=int)
     method = request.args.get('method', 'ensemble')
 
-    # 获取台风数据
+    # 获取台风数据 - 搜索全年（tfbh是台风编号，不是年月）
     year = int(tfbh[:4])
-    month = int(tfbh[4:6])
-    year_month = f"{year}{str(month).zfill(2)}"
-    all_data = fetch_isc_typhoon_data(year_month)
-
     target = None
-    for t in all_data:
-        if t.get('tfbh') == tfbh or t.get('ident') == tfbh:
-            target = t
+    for month in range(1, 13):
+        year_month = f"{year}{str(month).zfill(2)}"
+        all_data = fetch_isc_typhoon_data(year_month)
+        for t in all_data:
+            if t.get('tfbh') == tfbh or t.get('ident') == tfbh:
+                target = t
+                break
+        if target:
             break
 
     if target:
@@ -2004,33 +2328,41 @@ def get_prediction_methods():
         },
         {
             'id': 'gfs',
-            'name': 'GFS数值预报',
+            'name': 'GFS涡旋追踪',
             'accuracy': '高',
-            'description': 'NOAA全球预报系统，获取500/700hPa实际环境风场数据，最权威的NWP模型',
+            'description': 'NOAA GFS模型MSLP气压场网格追踪台风低压中心，业务预报标准方法',
             'color': '#f59e0b',
-            'best_for': '24-120小时中期（当前活跃台风最有效）',
+            'best_for': '24-120小时中期',
+        },
+        {
+            'id': 'ecmwf',
+            'name': 'ECMWF IFS',
+            'accuracy': '极高',
+            'description': '欧洲中期天气预报中心确定性预报MSLP涡旋追踪，全球最准NWP之一',
+            'color': '#22c55e',
+            'best_for': '24-120小时中期（最权威NWP）',
         },
         {
             'id': 'gfs_graphcast',
             'name': 'GraphCast AI',
             'accuracy': '较高',
-            'description': 'DeepMind开发的AI天气模型(Nature 2024论文)，超越传统NWP，仅对当前活跃台风有效',
+            'description': 'DeepMind开发AI天气模型，超越传统NWP',
             'color': '#ef4444',
             'best_for': '24-120小时（当前台风）',
         },
         {
             'id': 'aifs',
             'name': 'ECMWF AIFS AI',
-            'accuracy': '最高(AI类)',
-            'description': 'ECMWF的AI预报系统(2025年正式运行)，ECMWF宣称超越GraphCast，500/700/850hPa多层次引导',
+            'accuracy': '高',
+            'description': 'ECMWF的AI预报系统MSLP涡旋追踪',
             'color': '#14b8a6',
-            'best_for': '24-120小时中期（当前台风，最权威AI预报）',
+            'best_for': '24-120小时中期',
         },
         {
             'id': 'cma',
             'name': 'CMA GRAPES',
             'accuracy': '高',
-            'description': '中国气象局自主研发的全球数值预报模式(15km分辨率)，对西北太平洋台风有本地优势',
+            'description': '中国气象局全球数值预报MSLP涡旋追踪，对西北太平洋台风有本地优势',
             'color': '#f97316',
             'best_for': '24-72小时短期（西太平洋台风最佳）',
         },
@@ -2062,11 +2394,11 @@ def get_prediction_methods():
         },
         {
             'id': 'ensemble',
-            'name': 'Kalman融合',
+            'name': '综合融合(含机构)',
             'accuracy': '最高',
-            'description': 'Kalman滤波器动态加权融合所有方法，权重随预测时长自动调整',
+            'description': 'Kalman融合所有方法+6家气象机构预报(中/日/美/欧/韩/港)加权锚定，机构预报占72%权重',
             'color': '#06b6d4',
-            'best_for': '全时段综合最佳',
+            'best_for': '全时段综合最佳（推荐）',
         },
     ]
 
