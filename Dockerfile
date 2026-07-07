@@ -1,4 +1,4 @@
-FROM python:3.13-slim
+FROM python:3.12-slim
 
 LABEL maintainer="typhoon-system"
 LABEL description="台风路径预测系统 - AI预测+地图可视化"
