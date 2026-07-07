@@ -15,16 +15,22 @@ RUN ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
 # 设置工作目录
 WORKDIR /app
 
-# 安装Python依赖
+# 先安装 PyTorch CPU 版本（体积远小于 GPU 版本，约 200MB vs 1.5GB）
+RUN pip install --no-cache-dir \
+    torch==2.5.1+cpu --index-url https://download.pytorch.org/whl/cpu \
+    && rm -rf /root/.cache/pip
+
+# 安装其余Python依赖
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+    && rm -rf /root/.cache/pip
 
 # 复制应用代码
 COPY backend/ /app/backend/
 COPY static/ /app/static/
 
 # 创建数据目录
-RUN mkdir -p /app/data/isc /app/data/nii /app/data/predictions /app/data/hashes /app/models/pangu
+RUN mkdir -p /app/data/isc /app/data/nii /app/data/predictions /app/data/hashes /app/backend/models/pangu
 
 # 环境变量
 ENV PYTHONUNBUFFERED=1

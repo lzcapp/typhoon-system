@@ -1,0 +1,38 @@
+# Git
+.git
+.gitignore
+
+# 数据和模型（通过volume持久化，不打包进镜像）
+data/
+models/
+
+# Python缓存
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 部署脚本（运行时不需要打包）
+deploy.sh
+start.sh
+typhoon-system.service
+
+# 前端开发目录（使用static/中的构建结果）
+frontend/
+
+# Docker文件自身
+Dockerfile
+docker-compose.yml
+.dockerignore

@@ -179,3 +179,10 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# 项目特定：数据和模型不提交（通过Docker volume持久化）
+data/
+models/
+
+# macOS
+.DS_Store

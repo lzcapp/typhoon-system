@@ -2,5 +2,5 @@ flask>=3.0
 flask-cors>=4.0
 requests>=2.31
 numpy>=2.0
-torch>=2.1
+# torch 通过 Dockerfile 单独安装 CPU 版本，此处不重复声明
 apscheduler>=3.10

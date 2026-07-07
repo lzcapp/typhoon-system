@@ -1,10 +1,20 @@
+# 生产部署 docker-compose（从 GHCR 拉取预构建镜像）
+# 使用方式: docker compose -f docker-compose.deploy.yml up -d
+#
+# 镜像来源:
+#   GHCR:  ghcr.io/<你的GitHub用户名>/typhoon-system:latest
+#   DockerHub: <你的DockerHub用户名>/typhoon-system:latest
+#
+# 1Panel 部署时将此文件内容粘贴到编排中，修改路径为绝对路径
+
 version: '3.8'
 
 services:
   typhoon-system:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    # 从 GitHub Container Registry 拉取（推荐，无需额外注册）
+    image: ghcr.io/lzcapp/typhoon-system:latest
+    # 或者从 Docker Hub 拉取（取消注释下行，注释上行）
+    # image: lzcapp/typhoon-system:latest
     container_name: typhoon-system
     restart: always
     ports:
