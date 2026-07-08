@@ -1029,7 +1029,9 @@ function renderTyphoonDetail(t) {
         <button class="pred-btn" onclick="runPredictionFor(24)">24h</button>
         <button class="pred-btn" onclick="runPredictionFor(48)">48h</button>
         <button class="pred-btn" onclick="runPredictionFor(72)">72h</button>
-        <button class="pred-btn active" onclick="runPredictionFor(120)">120h</button>
+        <button class="pred-btn" onclick="runPredictionFor(120)">5天</button>
+        <button class="pred-btn active" onclick="runPredictionFor(168)">7天</button>
+        <button class="pred-btn" onclick="runPredictionFor(240)">10天</button>
       </div>
       <div id="predictionResults"></div>
       <div id="lstmTrainPanel" style="margin-top:8px;display:none">
@@ -1331,7 +1333,7 @@ async function runPrediction() {
     showToast('请先选择一个台风', true);
     return;
   }
-  await runPredictionFor(120);
+  await runPredictionFor(168);
 }
 
 async function runPredictionFor(hours) {
@@ -1339,6 +1341,15 @@ async function runPredictionFor(hours) {
     showToast('请先选择一个台风', true);
     return;
   }
+
+  // 更新时长按钮 active 状态
+  document.querySelectorAll('.prediction-controls .pred-btn').forEach(btn => {
+    const btnHours = parseInt(btn.textContent) ||
+                     (btn.textContent === '5天' ? 120 :
+                      btn.textContent === '7天' ? 168 :
+                      btn.textContent === '10天' ? 240 : 0);
+    btn.classList.toggle('active', btnHours === hours);
+  });
 
   // 检查LSTM方法是否可用
   if (activePredictionMethod === 'lstm' || activePredictionMethod === 'all') {

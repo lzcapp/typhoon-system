@@ -2030,8 +2030,8 @@ class TyphoonPredictor:
         # 数据越密集，置信度越高
         base_confidence = min(0.9, 0.5 + n * 0.03)
 
-        # 预测时间越远，置信度越低
-        time_decay = math.exp(-hours / 120)
+        # 预测时间越远，置信度越低（7天仍有60-70%参考价值）
+        time_decay = math.exp(-hours / 200)
 
         return round(base_confidence * time_decay, 2)
 
