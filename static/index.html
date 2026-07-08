@@ -94,6 +94,9 @@ body {
 }
 .header-btn:hover { background: var(--bg-hover); border-color: var(--accent-blue); }
 .header-btn.active { background: var(--accent-blue); border-color: var(--accent-blue); }
+.header-btn .fa-sync-alt.spinning { animation: spin 0.8s linear infinite; }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+.last-update { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
 
 /* Left Panel - Typhoon List */
 .left-panel {
@@ -506,8 +509,12 @@ body {
       <button class="header-btn" id="btnPredict" onclick="runPrediction()">
         <i class="fas fa-brain"></i> AI 预测
       </button>
-      <button class="header-btn" onclick="refreshData()">
-        <i class="fas fa-sync-alt"></i> 刷新数据
+      <button class="header-btn" id="btnRefresh" onclick="refreshAllData()">
+        <i class="fas fa-sync-alt" id="refreshIcon"></i> 刷新数据
+      </button>
+      <span class="last-update" id="lastUpdateTime">--</span>
+      <button class="header-btn" id="btnAutoRefresh" onclick="toggleAutoRefresh()" style="font-size:12px;padding:5px 10px">
+        <i class="fas fa-clock"></i> <span id="autoRefreshLabel">自动: 5分钟</span>
       </button>
     </div>
   </header>
@@ -770,24 +777,89 @@ async function loadDefaultYearData() {
 }
 
 // ============================================================
-// 自动刷新：每5分钟检查活跃台风
+// 自动刷新：每5分钟刷新活跃台风 + 已选中台风详情
 // ============================================================
 let refreshInterval = null;
+let autoRefreshEnabled = true;
+let lastRefreshTime = null;
+const AUTO_REFRESH_MS = 5 * 60 * 1000; // 5分钟
+
+function updateLastRefreshDisplay() {
+  lastRefreshTime = new Date();
+  const el = document.getElementById('lastUpdateTime');
+  if (el) {
+    el.textContent = '更新: ' + lastRefreshTime.toLocaleTimeString('zh-CN', {hour:'2-digit', minute:'2-digit'});
+  }
+}
+
 function startAutoRefresh() {
   if (refreshInterval) clearInterval(refreshInterval);
+  if (!autoRefreshEnabled) return;
   refreshInterval = setInterval(async () => {
+    await doAutoRefresh();
+  }, AUTO_REFRESH_MS);
+  // 更新按钮状态
+  updateAutoRefreshButton();
+}
+
+async function doAutoRefresh() {
+  const icon = document.getElementById('refreshIcon');
+  try {
+    if (icon) icon.classList.add('spinning');
+    // 1. 刷新台风列表
     const data = await apiCall('/api/typhoons/current');
     if (data && data.typhoons && data.count > 0) {
       currentTyphoons = data.typhoons;
       renderTyphoonList(data.typhoons);
-      showToast(`自动刷新: ${data.count} 个活跃台风`);
-      // 如果有活跃台风，地图中心移到最新位置
-      const lastPoint = data.typhoons[0]?.points?.[data.typhoons[0].points.length - 1];
-      if (lastPoint && map) {
-        map.setView([lastPoint.lat, lastPoint.lng], 5, { animate: true });
+      // 2. 如果有选中台风，刷新其详情+预测
+      if (selectedTyphoon) {
+        const detailData = await apiCall(`/api/typhoons/detail/${selectedTyphoon}`);
+        if (detailData) {
+          renderTyphoonDetail(detailData);
+          renderTrackOnMap(detailData);
+        }
+      } else {
+        // 没有选中台风时，地图移到最新位置
+        const lastPoint = data.typhoons[0]?.points?.[data.typhoons[0].points.length - 1];
+        if (lastPoint && map) {
+          map.setView([lastPoint.lat, lastPoint.lng], 5, { animate: true });
+        }
       }
+      showToast(`自动刷新: ${data.count} 个活跃台风`);
     }
-  }, 5 * 60 * 1000); // 5分钟
+    updateLastRefreshDisplay();
+  } catch(e) {
+    console.error('Auto refresh error:', e);
+  } finally {
+    if (icon) icon.classList.remove('spinning');
+  }
+}
+
+function toggleAutoRefresh() {
+  autoRefreshEnabled = !autoRefreshEnabled;
+  if (autoRefreshEnabled) {
+    startAutoRefresh();
+    showToast('自动刷新已开启 (5分钟)');
+  } else {
+    if (refreshInterval) clearInterval(refreshInterval);
+    refreshInterval = null;
+    showToast('自动刷新已关闭');
+  }
+  updateAutoRefreshButton();
+}
+
+function updateAutoRefreshButton() {
+  const btn = document.getElementById('btnAutoRefresh');
+  const label = document.getElementById('autoRefreshLabel');
+  if (btn && label) {
+    if (autoRefreshEnabled) {
+      label.textContent = '自动: 5分钟';
+      btn.classList.add('active');
+    } else {
+      label.textContent = '自动: 关闭';
+      btn.classList.remove('active');
+    }
+  }
 }
 
 // ============================================================
@@ -855,6 +927,7 @@ async function loadCurrentTyphoons() {
     showToast('暂无活跃台风，加载本年度数据');
     await loadYearTyphoons();
   }
+  updateLastRefreshDisplay();
   hideLoading();
   document.getElementById('btnCurrent').classList.remove('active');
 }
@@ -870,6 +943,7 @@ async function loadYearTyphoons() {
     renderTyphoonList(data.typhoons);
     showToast(`${year}年共 ${data.count} 个台风`);
   }
+  updateLastRefreshDisplay();
   hideLoading();
 }
 
@@ -887,9 +961,44 @@ function searchTyphoons() {
   renderTyphoonList(filtered);
 }
 
-function refreshData() {
-  const year = document.getElementById('yearSelect').value;
-  loadYearTyphoons();
+async function refreshAllData() {
+  const icon = document.getElementById('refreshIcon');
+  const btn = document.getElementById('btnRefresh');
+  try {
+    if (icon) icon.classList.add('spinning');
+    if (btn) btn.disabled = true;
+
+    // 1. 刷新台风列表
+    const year = document.getElementById('yearSelect').value;
+    const currentData = await apiCall('/api/typhoons/current');
+    const yearData = await apiCall(`/api/typhoons/year/${year}`);
+
+    // 合并：优先显示活跃台风
+    if (currentData && currentData.typhoons && currentData.count > 0) {
+      currentTyphoons = currentData.typhoons;
+      renderTyphoonList(currentData.typhoons);
+    } else if (yearData && yearData.typhoons) {
+      currentTyphoons = yearData.typhoons;
+      renderTyphoonList(yearData.typhoons);
+    }
+
+    // 2. 如果有选中台风，刷新其详情+路径+预测
+    if (selectedTyphoon) {
+      const detailData = await apiCall(`/api/typhoons/detail/${selectedTyphoon}`);
+      if (detailData) {
+        renderTyphoonDetail(detailData);
+        renderTrackOnMap(detailData);
+      }
+    }
+
+    updateLastRefreshDisplay();
+    showToast('数据刷新完成');
+  } catch(e) {
+    showToast('刷新失败: ' + e.message, true);
+  } finally {
+    if (icon) icon.classList.remove('spinning');
+    if (btn) btn.disabled = false;
+  }
 }
 
 // ============================================================
