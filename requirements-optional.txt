@@ -1,0 +1,7 @@
+# === 可选依赖（安装失败不影响系统运行，有 fallback 逻辑） ===
+# ECMWF BUFR 台风轨迹数据 (P1)
+ecmwf-opendata>=0.3
+pdbufr>=0.10
+eccodes>=1.7
+# Pangu-Weather ONNX 推理 (P2)
+onnxruntime>=1.17

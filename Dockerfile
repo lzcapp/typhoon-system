@@ -21,9 +21,30 @@ RUN pip install --no-cache-dir \
     torch==2.5.1+cpu --index-url https://download.pytorch.org/whl/cpu \
     && rm -rf /root/.cache/pip
 
-# 安装其余Python依赖
+# 安装核心Python依赖（必须成功）
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
+    && rm -rf /root/.cache/pip
+
+# 逐个安装可选Python依赖（每个独立失败，不影响其他）
+# P1: ECMWF BUFR台风轨迹 - ecmwf-opendata（纯Python，一般可成功）
+RUN pip install --no-cache-dir "ecmwf-opendata>=0.3" || \
+    echo "⚠️ ecmwf-opendata安装失败，ECMWF BUFR下载不可用" \
+    && rm -rf /root/.cache/pip
+
+# P1: BUFR解析 - eccodes（需要eccodeslib wheel，可能失败）
+RUN pip install --no-cache-dir "eccodes>=1.7" || \
+    echo "⚠️ eccodes安装失败，BUFR解析将退化为DISS HTTP模式" \
+    && rm -rf /root/.cache/pip
+
+# P1: BUFR解析高级接口 - pdbufr（依赖eccodes）
+RUN pip install --no-cache-dir "pdbufr>=0.10" || \
+    echo "⚠️ pdbufr安装失败，BUFR解析将使用eccodes底层接口" \
+    && rm -rf /root/.cache/pip
+
+# P2: Pangu-Weather ONNX推理 - onnxruntime（需要平台对应wheel）
+RUN pip install --no-cache-dir "onnxruntime>=1.17" || \
+    echo "⚠️ onnxruntime安装失败，Pangu-Weather推理不可用" \
     && rm -rf /root/.cache/pip
 
 # 复制应用代码
