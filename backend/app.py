@@ -8,6 +8,7 @@ import math
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
@@ -289,25 +290,41 @@ class TyphoonPredictor:
         predictions = {}
         last_point = points[-1]
 
-        # 1. 趋势外推
+        # 1. 趋势外推（本地计算，秒级）
         if method in ['trend', 'ensemble', 'all']:
             predictions['trend'] = TyphoonPredictor._trend_extrapolation(points, hours)
 
-        # 2. 物理模型
+        # 2. 物理模型（本地计算，秒级）
         if method in ['physics', 'ensemble', 'all']:
             predictions['physics'] = TyphoonPredictor._physics_model(points, hours)
 
-        # 3. GFS涡旋追踪（MSLP气压场最低中心）- ensemble只调用GFS+ECMWF减少API压力
+        # 3. NWP涡旋追踪 —— 并发调用多个NWP模型（GFS、ECMWF等）
+        #    串行调用每个耗时10-20秒，并发后总耗时等于最慢的单次调用
+        nwp_tasks = []
         if method in ['gfs', 'ensemble', 'all']:
-            gfs_pred = TyphoonPredictor._nwp_vortex_track(last_point, hours, model='gfs', model_label='GFS')
-            if gfs_pred:
-                predictions['gfs'] = gfs_pred
-
-        # 3b. ECMWF IFS涡旋追踪（欧洲中心确定性预报，全球最准NWP之一）
+            nwp_tasks.append(('gfs', 'gfs', 'GFS'))
         if method in ['ecmwf', 'ensemble', 'all']:
-            ecmwf_pred = TyphoonPredictor._nwp_vortex_track(last_point, hours, model='ecmwf_ifs04', model_label='ECMWF IFS')
-            if ecmwf_pred:
-                predictions['ecmwf'] = ecmwf_pred
+            nwp_tasks.append(('ecmwf', 'ecmwf_ifs04', 'ECMWF IFS'))
+        if method in ['aifs', 'all']:
+            nwp_tasks.append(('aifs', 'aifs', 'AIFS'))
+        if method in ['cma', 'all']:
+            nwp_tasks.append(('cma', 'cma_grapes_global', 'CMA GRAPES'))
+
+        if nwp_tasks:
+            with ThreadPoolExecutor(max_workers=min(len(nwp_tasks), 4)) as pool:
+                future_map = {}
+                for key, model, label in nwp_tasks:
+                    future_map[pool.submit(
+                        TyphoonPredictor._nwp_vortex_track, last_point, hours, model, label
+                    )] = key
+                for future in as_completed(future_map):
+                    key = future_map[future]
+                    try:
+                        result = future.result()
+                        if result:
+                            predictions[key] = result
+                    except Exception as e:
+                        print(f"NWP concurrent error ({key}): {e}")
 
         # 4. GraphCast AI预报（仅单独调用时使用）
         if method in ['gfs_graphcast', 'all']:
@@ -315,19 +332,7 @@ class TyphoonPredictor:
             if gc_pred:
                 predictions['gfs_graphcast'] = gc_pred
 
-        # 4b. ECMWF AIFS AI预报系统（仅单独调用时使用）
-        if method in ['aifs', 'all']:
-            aifs_pred = TyphoonPredictor._nwp_vortex_track(last_point, hours, model='aifs', model_label='AIFS')
-            if aifs_pred:
-                predictions['aifs'] = aifs_pred
-
-        # 4c. CMA GRAPES涡旋追踪（仅单独调用时使用）
-        if method in ['cma', 'all']:
-            cma_pred = TyphoonPredictor._nwp_vortex_track(last_point, hours, model='cma_grapes_global', model_label='CMA GRAPES')
-            if cma_pred:
-                predictions['cma'] = cma_pred
-
-        # 5. 历史相似路径类比法（仅单独调用或all时使用，ensemble跳过以避免慢速历史搜索）
+        # 5. 历史相似路径类比法（仅单独调用或all时使用，ensemble跳过）
         if method in ['analog', 'all']:
             analog_pred = TyphoonPredictor._analog_prediction(typhoon_data, hours)
             if analog_pred:
@@ -339,37 +344,37 @@ class TyphoonPredictor:
             if lstm_pred:
                 predictions['lstm'] = lstm_pred
 
-        # 7. Pangu-Weather盘古大模型（可选，需下载ONNX权重+ERA5数据）
+        # 7. Pangu-Weather盘古大模型（可选）
         if method in ['pangu', 'all']:
             pangu_pred = TyphoonPredictor._pangu_prediction(typhoon_data, hours)
             if pangu_pred:
                 predictions['pangu'] = pangu_pred
 
         # ★ 关键：在ensemble融合之前，先纳入机构预报
-        # 否则_kalman_ensemble看不到任何forecast_*数据，机构锚定完全失效
         if typhoon_data.get('forecasts'):
             for agency, fc_data in typhoon_data['forecasts'].items():
                 predictions[f'forecast_{agency}'] = fc_data['points']
 
         # 综合融合 (Kalman滤波加权，含机构预报锚定)
-        if method == 'ensemble' and len(predictions) >= 2:
-            ensemble_pred = TyphoonPredictor._kalman_ensemble(predictions, hours, last_point)
-            if ensemble_pred:
-                predictions['ensemble'] = ensemble_pred
-
-        if method == 'all' and len(predictions) >= 2:
+        if method in ['ensemble', 'all'] and len(predictions) >= 2:
             ensemble_pred = TyphoonPredictor._kalman_ensemble(predictions, hours, last_point)
             if ensemble_pred:
                 predictions['ensemble'] = ensemble_pred
 
         # ============================================================
-        # 登陆点检测
+        # 登陆点检测（增强版：线段相交法 + 距离法回退）
         # ============================================================
         landfalls = {}
         for method_name, pred_points in predictions.items():
             if method_name.startswith('forecast_'):
                 continue
-            lf = detect_landfall_from_segments(pred_points, margin_deg=0.3)
+            # 1. 精确的线段相交法检测
+            lf = detect_landfall_from_segments(pred_points, margin_deg=0.4)
+            if lf:
+                landfalls[method_name] = lf
+                continue
+            # 2. 距离法回退兜底（增大 margin 检测近岸路径）
+            lf = detect_landfall(pred_points, margin_deg=0.5)
             if lf:
                 landfalls[method_name] = lf
 
@@ -600,7 +605,7 @@ class TyphoonPredictor:
         )
 
         try:
-            response = req_lib.get(url, timeout=20)
+            response = req_lib.get(url, timeout=10)
             if response.status_code != 200:
                 print(f"NWP vortex track API error ({model_label}): {response.status_code}")
                 return None

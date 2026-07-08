@@ -807,16 +807,39 @@ function showToast(msg, isError) {
   setTimeout(() => t.className = 'toast', 3000);
 }
 
-async function apiCall(url) {
+async function apiCall(url, timeoutMs = 30000) {
   try {
-    const resp = await fetch(API_BASE + url);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const resp = await fetch(API_BASE + url, { signal: controller.signal });
+    clearTimeout(timer);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     return await resp.json();
   } catch (e) {
     console.error('API Error:', e);
-    showToast('数据加载失败: ' + e.message, true);
+    if (e.name === 'AbortError') {
+      showToast('请求超时，请尝试切换更快的预测方法', true);
+    } else {
+      showToast('数据加载失败: ' + e.message, true);
+    }
     return null;
   }
+}
+
+// 预测专用API调用：超时更长(5分钟)，自动降级
+async function predictApiCall(tfbh, hours, method) {
+  // 第一次尝试：用用户指定的方法（超时5分钟）
+  const data = await apiCall(`/api/typhoons/predict/${tfbh}?hours=${hours}&method=${method}`, 300000);
+  if (data && data.predictions) return data;
+
+  // 如果ensemble/all失败，自动降级到trend（秒级响应）
+  if (method === 'ensemble' || method === 'all') {
+    showToast('综合方法超时，自动降级为趋势外推...', true);
+    const fallback = await apiCall(`/api/typhoons/predict/${tfbh}?hours=${hours}&method=trend`, 30000);
+    if (fallback && fallback.predictions) return fallback;
+  }
+
+  return null;
 }
 
 async function loadCurrentTyphoons() {
@@ -1384,7 +1407,7 @@ async function trainLSTM() {
 }
 
 async function loadAndRenderPrediction(tfbh, hours, method) {
-  const data = await apiCall(`/api/typhoons/predict/${tfbh}?hours=${hours}&method=${method}`);
+  const data = await predictApiCall(tfbh, hours, method);
   if (!data || !data.predictions) return;
 
   // 清除之前的预测图层
