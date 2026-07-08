@@ -437,6 +437,14 @@ body {
   animation: spin 1s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* 登陆点脉冲动画 */
+@keyframes landfallPulse {
+  0% { transform: translate(-50%,-50%) scale(1); opacity: 0.8; }
+  100% { transform: translate(-50%,-50%) scale(3); opacity: 0; }
+}
+.landfall-pulse { background: transparent !important; border: none !important; }
+.landfall-label { background: transparent !important; border: none !important; }
 .loading-text { color: var(--text-secondary); font-size: 14px; }
 
 /* Empty state */
@@ -997,8 +1005,8 @@ function renderTyphoonDetail(t) {
       <div class="prediction-controls">
         <button class="pred-btn" onclick="runPredictionFor(24)">24h</button>
         <button class="pred-btn" onclick="runPredictionFor(48)">48h</button>
-        <button class="pred-btn active" onclick="runPredictionFor(72)">72h</button>
-        <button class="pred-btn" onclick="runPredictionFor(120)">120h</button>
+        <button class="pred-btn" onclick="runPredictionFor(72)">72h</button>
+        <button class="pred-btn active" onclick="runPredictionFor(120)">120h</button>
       </div>
       <div id="predictionResults"></div>
       <div id="lstmTrainPanel" style="margin-top:8px;display:none">
@@ -1137,7 +1145,7 @@ function renderTrackOnMap(t) {
 
   // 显示预测路径（如果有）
   if (showPrediction && selectedTyphoon) {
-    loadAndRenderPrediction(selectedTyphoon, 72, activePredictionMethod);
+    loadAndRenderPrediction(selectedTyphoon, 120, activePredictionMethod);
   }
 
   // 显示机构预报（如果有）
@@ -1300,7 +1308,7 @@ async function runPrediction() {
     showToast('请先选择一个台风', true);
     return;
   }
-  await runPredictionFor(72);
+  await runPredictionFor(120);
 }
 
 async function runPredictionFor(hours) {
@@ -1515,49 +1523,64 @@ async function loadAndRenderPrediction(tfbh, hours, method) {
 
     // 地图上绘制登陆点标记
     for (const [methodKey, lf] of Object.entries(data.landfalls)) {
+      if (!lf.found) continue;
       const color = methodKey === 'ensemble' ? '#ef4444' : (PRED_COLORS[methodKey] || '#f59e0b');
+      const isEns = methodKey === 'ensemble';
 
-      // 登陆点图标（红色三角旗标）
-      const icon = L.divIcon({
-        className: 'landfall-marker',
-        html: `<div style="
-          position:relative;
-          width:0;height:0;
-          border-left:10px solid transparent;
-          border-right:10px solid transparent;
-          border-bottom:18px solid ${color};
-          filter:drop-shadow(0 2px 4px rgba(0,0,0,0.5));
-        "><div style="
-          position:absolute;top:6px;left:-3px;
-          font-size:8px;color:#fff;
-          text-shadow:0 1px 2px rgba(0,0,0,0.5);
-        ">${lf.hours_from_base}h</div></div>`,
-        iconSize: [20, 20],
-        iconAnchor: [10, 18],
-        popupAnchor: [0, -20],
+      // 1. 脉冲圆圈（在预测路径上标注登陆点）
+      const pulseIcon = L.divIcon({
+        className: 'landfall-pulse',
+        html: `<div style="position:relative;width:30px;height:30px;">
+          <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+            width:14px;height:14px;border-radius:50%;background:${color};
+            border:3px solid #fff;box-shadow:0 0 8px ${color},0 0 16px ${color};z-index:2;"></div>
+          <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+            width:14px;height:14px;border-radius:50%;border:2px solid ${color};
+            animation:landfallPulse 1.5s ease-out infinite;z-index:1;"></div>
+        </div>`,
+        iconSize: [30, 30],
+        iconAnchor: [15, 15],
+        popupAnchor: [0, -18],
       });
-
-      const m = L.marker([lf.lat, lf.lng], { icon }).addTo(map);
-      m.bindPopup(`
-        <div style="font-size:12px;min-width:180px">
-          <strong style="color:${color}">🌪 预测登陆点</strong><br>
-          方法: <strong>${methodKey === 'ensemble' ? 'Kalman融合' : methodKey === 'trend' ? '趋势外推' : methodKey === 'physics' ? '物理模型' : methodKey === 'lstm' ? 'LSTM' : methodKey === 'gfs' ? 'GFS' : methodKey}</strong><br>
-          海岸: <strong>${lf.coast_name}</strong><br>
-          位置: ${lf.lat}°N, ${lf.lng}°E<br>
-          时间: ${lf.time ? lf.time.slice(0,16) : '-'}<br>
-          约${lf.hours_from_base}小时后登陆<br>
-          气压: ${lf.pressure || '-'} hPa<br>
-          风速: ${lf.wind_speed || '-'} m/s
+      const pulseMarker = L.marker([lf.lat, lf.lng], { icon: pulseIcon, zIndexOffset: 1000 }).addTo(map);
+      pulseMarker.bindPopup(`
+        <div style="font-size:13px;min-width:200px;">
+          <div style="font-size:14px;font-weight:bold;color:${color};margin-bottom:4px;">
+            🚩 预测登陆点 ${isEns ? '(Kalman融合)' : '(' + methodKey + ')'}
+          </div>
+          <div style="color:#666;margin-bottom:2px;">📍 ${lf.coast_name} 沿海</div>
+          <div>${lf.lat}°N, ${lf.lng}°E</div>
+          <div>⏰ ${lf.time ? lf.time.slice(0,16) : '-'} (${lf.hours_from_base}h后)</div>
+          <div>🌡 ${lf.pressure || '-'} hPa | ${lf.wind_speed || '-'} m/s</div>
         </div>
       `);
-      predictionLayers.push(m);
+      predictionLayers.push(pulseMarker);
 
-      // 从当前台风位置画虚线到登陆点
-      const approachLine = L.polyline(
-        [[data.base_lat, data.base_lng], [lf.lat, lf.lng]],
-        { color: color, weight: 2, opacity: 0.5, dashArray: '8, 6' }
-      ).addTo(map);
-      predictionLayers.push(approachLine);
+      // 2. 登陆标签（显示在登陆点旁边）
+      const labelIcon = L.divIcon({
+        className: 'landfall-label',
+        html: `<div style="
+          background:${color};color:#fff;
+          padding:2px 8px;border-radius:4px;
+          font-size:11px;font-weight:bold;
+          white-space:nowrap;
+          box-shadow:0 2px 6px rgba(0,0,0,0.4);
+          border:1px solid rgba(255,255,255,0.3);
+        ">🚩 ${lf.coast_name} ${lf.hours_from_base}h</div>`,
+        iconSize: [120, 20],
+        iconAnchor: [0, -12],
+      });
+      const labelMarker = L.marker([lf.lat, lf.lng], { icon: labelIcon, interactive: false }).addTo(map);
+      predictionLayers.push(labelMarker);
+
+      // 3. 从当前台风位置画虚线到登陆点（仅ensemble）
+      if (isEns) {
+        const approachLine = L.polyline(
+          [[data.base_lat, data.base_lng], [lf.lat, lf.lng]],
+          { color: color, weight: 2, opacity: 0.4, dashArray: '8, 6' }
+        ).addTo(map);
+        predictionLayers.push(approachLine);
+      }
     }
   }
 
