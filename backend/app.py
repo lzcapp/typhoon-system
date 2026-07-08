@@ -17,6 +17,9 @@ import requests as req_lib
 from lstm_predictor import lstm_predict, is_lstm_ready, LSTMTrainer, WINDOW_SIZE
 from pangu_predictor import pangu_predict, is_pangu_ready
 
+# 海岸线 & 登陆检测
+from coastline import detect_landfall_from_segments, detect_landfall, get_coastline_geojson
+
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'static')
 app = Flask(__name__, static_folder=STATIC_DIR)
 CORS(app)  # 允许跨域访问
@@ -359,6 +362,17 @@ class TyphoonPredictor:
             if ensemble_pred:
                 predictions['ensemble'] = ensemble_pred
 
+        # ============================================================
+        # 登陆点检测
+        # ============================================================
+        landfalls = {}
+        for method_name, pred_points in predictions.items():
+            if method_name.startswith('forecast_'):
+                continue
+            lf = detect_landfall_from_segments(pred_points, margin_deg=0.3)
+            if lf:
+                landfalls[method_name] = lf
+
         return {
             'typhoon_id': typhoon_data.get('id', ''),
             'method': method,
@@ -366,6 +380,7 @@ class TyphoonPredictor:
             'base_lat': points[-1]['lat'] if points else 0,
             'base_lng': points[-1]['lng'] if points else 0,
             'predictions': predictions,
+            'landfalls': landfalls,
             'available_methods': list(predictions.keys()),
             'confidence': TyphoonPredictor._calculate_confidence(points, hours),
         }
@@ -2408,6 +2423,101 @@ def get_prediction_methods():
         'recommendation': '建议使用 ensemble 或 lstm 方法获得最准确的预测。'
                           'LSTM需要先训练：POST /api/lstm/train'
     })
+
+
+@app.route('/api/coastline')
+def get_coastline():
+    """返回NW Pacific海岸线GeoJSON（用于前端地图展示）"""
+    return jsonify(get_coastline_geojson())
+
+
+@app.route('/api/landfall/<tfbh>')
+def predict_landfall(tfbh):
+    """独立登陆点预测端点，返回详细的登陆信息"""
+    hours = request.args.get('hours', 120, type=int)
+    method = request.args.get('method', 'ensemble')
+
+    # 查找台风数据
+    year = int(tfbh[:4])
+    target = None
+    for month in range(1, 13):
+        year_month = f"{year}{str(month).zfill(2)}"
+        all_data = fetch_isc_typhoon_data(year_month)
+        for t in all_data:
+            if t.get('tfbh') == tfbh or t.get('ident') == tfbh:
+                target = t
+                break
+        if target:
+            break
+
+    if not target:
+        nii_data = fetch_nii_typhoon_geojson(tfbh)
+        if nii_data:
+            normalized = normalize_nii_data(nii_data, tfbh)
+        else:
+            return jsonify({'error': f'台风 {tfbh} 数据未找到'}), 404
+    else:
+        normalized = normalize_isc_data([target])[0]
+
+    result = TyphoonPredictor.predict_path(normalized, hours=hours, method=method)
+    landfalls = result.get('landfalls', {})
+
+    return jsonify({
+        'typhoon_id': tfbh,
+        'name': normalized.get('name_cn', '') or normalized.get('name_en', ''),
+        'hours': hours,
+        'method': method,
+        'base_time': result.get('base_time', ''),
+        'base_position': f"{result.get('base_lat', 0)}°N, {result.get('base_lng', 0)}°E",
+        'landfalls': landfalls,
+        'summary': _format_landfall_summary(landfalls, normalized),
+        'prediction_count': sum(1 for k in result.get('predictions', {})
+                                if not k.startswith('forecast_')),
+    })
+
+
+def _format_landfall_summary(landfalls, typhoon_data):
+    """格式化登陆摘要文本"""
+    if not landfalls:
+        return {
+            'text': '预测路径未显示登陆（台风可能在海上减弱消散或转向远离陆地）',
+            'will_landfall': False
+        }
+
+    # 优先使用 ensemble 方法的结果
+    lf = landfalls.get('ensemble') or next(iter(landfalls.values()))
+    method_name = 'ensemble' if 'ensemble' in landfalls else list(landfalls.keys())[0]
+    method_label = {
+        'ensemble': 'Kalman融合', 'trend': '趋势外推', 'physics': '物理模型',
+        'gfs': 'GFS数值预报', 'lstm': 'LSTM深度学习', 'ecmwf': 'ECMWF IFS'
+    }.get(method_name, method_name)
+
+    name = typhoon_data.get('name_cn', '') or typhoon_data.get('name_en', '') or '该台风'
+
+    return {
+        'will_landfall': True,
+        'text': f'{name}预计将于{lf["time"][:16] if lf.get("time") else "待定"}'
+                f'在{lf["coast_name"]}沿海登陆'
+                f'（{lf["lat"]}°N, {lf["lng"]}°E）'
+                f'，登陆时中心气压约{lf.get("pressure", "?")}hPa，'
+                f'最大风速约{lf.get("wind_speed", "?")}m/s。'
+                f'距当前约{lf["hours_from_base"]}小时。'
+                f'（预测方法: {method_label}）',
+        'landfall_point': {
+            'lat': lf['lat'],
+            'lng': lf['lng'],
+            'time': lf.get('time', ''),
+            'coast_name': lf['coast_name'],
+            'pressure': lf.get('pressure', 0),
+            'wind_speed': lf.get('wind_speed', 0),
+            'hours_from_base': lf.get('hours_from_base', 0),
+        },
+        'all_methods': {k: {
+            'lat': v['lat'], 'lng': v['lng'],
+            'coast_name': v['coast_name'],
+            'hours_from_base': v.get('hours_from_base', 0),
+        } for k, v in landfalls.items()},
+    }
 
 
 # ============================================================

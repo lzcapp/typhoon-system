@@ -617,6 +617,7 @@ const PRED_COLORS = {
   trend: '#3b82f6',
   physics: '#a855f7',
   gfs: '#f59e0b',
+  ecmwf: '#06b6d4',
   aifs: '#14b8a6',
   cma: '#f97316',
   gfs_graphcast: '#ef4444',
@@ -983,6 +984,7 @@ function renderTyphoonDetail(t) {
         <button class="pred-btn ${activePredictionMethod==='trend'?'active':''}" onclick="setPredMethod('trend')">趋势外推</button>
         <button class="pred-btn ${activePredictionMethod==='physics'?'active':''}" onclick="setPredMethod('physics')">物理模型</button>
         <button class="pred-btn ${activePredictionMethod==='gfs'?'active':''}" onclick="setPredMethod('gfs')">GFS预报</button>
+        <button class="pred-btn ${activePredictionMethod==='ecmwf'?'active':''}" onclick="setPredMethod('ecmwf')">🔵 ECMWF</button>
         <button class="pred-btn ${activePredictionMethod==='aifs'?'active':''}" onclick="setPredMethod('aifs')">🟢 AIFS</button>
         <button class="pred-btn ${activePredictionMethod==='cma'?'active':''}" onclick="setPredMethod('cma')">🟠 CMA</button>
         <button class="pred-btn ${activePredictionMethod==='gfs_graphcast'?'active':''}" onclick="setPredMethod('gfs_graphcast')">GraphCast</button>
@@ -1392,7 +1394,7 @@ async function loadAndRenderPrediction(tfbh, hours, method) {
     if (!points || !points.length) continue;
 
     const color = PRED_COLORS[methodKey] || '#888';
-    const label = methodKey === 'trend' ? '趋势外推' : methodKey === 'physics' ? '物理模型' : methodKey === 'ensemble' ? 'Kalman融合' : methodKey === 'gfs' ? 'GFS数值预报' : methodKey === 'aifs' ? 'ECMWF AIFS' : methodKey === 'cma' ? 'CMA GRAPES' : methodKey === 'gfs_graphcast' ? 'GraphCast AI' : methodKey === 'analog' ? '历史类比' : methodKey === 'lstm' ? 'LSTM深度学习' : methodKey === 'pangu' ? '盘古大模型' : methodKey;
+    const label = methodKey === 'trend' ? '趋势外推' : methodKey === 'physics' ? '物理模型' : methodKey === 'ensemble' ? 'Kalman融合' : methodKey === 'gfs' ? 'GFS数值预报' : methodKey === 'ecmwf' ? 'ECMWF IFS' : methodKey === 'aifs' ? 'ECMWF AIFS' : methodKey === 'cma' ? 'CMA GRAPES' : methodKey === 'gfs_graphcast' ? 'GraphCast AI' : methodKey === 'analog' ? '历史类比' : methodKey === 'lstm' ? 'LSTM深度学习' : methodKey === 'pangu' ? '盘古大模型' : methodKey;
 
     // 绘制预测路径
     const coords = [[data.base_lat, data.base_lng]];
@@ -1478,6 +1480,85 @@ async function loadAndRenderPrediction(tfbh, hours, method) {
           `).join('')}
         </table>
       </div>`;
+  }
+
+  // ============================================================
+  // 登陆点标记
+  // ============================================================
+  if (data.landfalls && Object.keys(data.landfalls).length > 0) {
+    // 在预测面板顶部添加登陆摘要
+    const lfEnsemble = data.landfalls['ensemble'];
+    const lfFirst = lfEnsemble || Object.values(data.landfalls)[0];
+    if (lfFirst) {
+      const lfMethodLabel = lfEnsemble ? 'Kalman融合' : Object.keys(data.landfalls)[0];
+      html = `
+        <div style="background:linear-gradient(135deg,rgba(239,68,68,0.15),rgba(234,179,8,0.1));border:1px solid rgba(239,68,68,0.4);border-radius:8px;padding:12px;margin-bottom:12px">
+          <div style="font-size:14px;font-weight:700;color:#ef4444;margin-bottom:4px">
+            <i class="fas fa-bullseye"></i> 预测登陆点 (${lfMethodLabel}方法)
+          </div>
+          <div style="font-size:12px;color:var(--text-primary);line-height:1.6">
+            <strong>📍 ${lfFirst.coast_name}</strong> 沿海<br>
+            位置: <strong>${lfFirst.lat}°N, ${lfFirst.lng}°E</strong><br>
+            预计时间: <strong>${lfFirst.time ? lfFirst.time.slice(0,16) : '-'}</strong> (约${lfFirst.hours_from_base}小时后)<br>
+            登陆强度: 气压 <strong>${lfFirst.pressure || '?'} hPa</strong> | 风速 <strong>${lfFirst.wind_speed || '?'} m/s</strong>
+          </div>
+          ${Object.keys(data.landfalls).length > 1 ? `
+          <div style="font-size:11px;color:var(--text-muted);margin-top:6px;border-top:1px solid rgba(239,68,68,0.2);padding-top:6px">
+            其他方法: ${Object.entries(data.landfalls)
+              .filter(([k]) => k !== 'ensemble')
+              .map(([k, v]) => `${k}→${v.coast_name}(${v.hours_from_base}h)`)
+              .join(' | ') || '全部一致'}
+          </div>` : ''}
+        </div>
+      ` + html;
+    }
+
+    // 地图上绘制登陆点标记
+    for (const [methodKey, lf] of Object.entries(data.landfalls)) {
+      const color = methodKey === 'ensemble' ? '#ef4444' : (PRED_COLORS[methodKey] || '#f59e0b');
+
+      // 登陆点图标（红色三角旗标）
+      const icon = L.divIcon({
+        className: 'landfall-marker',
+        html: `<div style="
+          position:relative;
+          width:0;height:0;
+          border-left:10px solid transparent;
+          border-right:10px solid transparent;
+          border-bottom:18px solid ${color};
+          filter:drop-shadow(0 2px 4px rgba(0,0,0,0.5));
+        "><div style="
+          position:absolute;top:6px;left:-3px;
+          font-size:8px;color:#fff;
+          text-shadow:0 1px 2px rgba(0,0,0,0.5);
+        ">${lf.hours_from_base}h</div></div>`,
+        iconSize: [20, 20],
+        iconAnchor: [10, 18],
+        popupAnchor: [0, -20],
+      });
+
+      const m = L.marker([lf.lat, lf.lng], { icon }).addTo(map);
+      m.bindPopup(`
+        <div style="font-size:12px;min-width:180px">
+          <strong style="color:${color}">🌪 预测登陆点</strong><br>
+          方法: <strong>${methodKey === 'ensemble' ? 'Kalman融合' : methodKey === 'trend' ? '趋势外推' : methodKey === 'physics' ? '物理模型' : methodKey === 'lstm' ? 'LSTM' : methodKey === 'gfs' ? 'GFS' : methodKey}</strong><br>
+          海岸: <strong>${lf.coast_name}</strong><br>
+          位置: ${lf.lat}°N, ${lf.lng}°E<br>
+          时间: ${lf.time ? lf.time.slice(0,16) : '-'}<br>
+          约${lf.hours_from_base}小时后登陆<br>
+          气压: ${lf.pressure || '-'} hPa<br>
+          风速: ${lf.wind_speed || '-'} m/s
+        </div>
+      `);
+      predictionLayers.push(m);
+
+      // 从当前台风位置画虚线到登陆点
+      const approachLine = L.polyline(
+        [[data.base_lat, data.base_lng], [lf.lat, lf.lng]],
+        { color: color, weight: 2, opacity: 0.5, dashArray: '8, 6' }
+      ).addTo(map);
+      predictionLayers.push(approachLine);
+    }
   }
 
   // 基准信息
