@@ -1447,9 +1447,10 @@ class TyphoonPredictor:
             'trend': 0.005,
         }
 
-        # 异常值剔除阈值：偏离机构共识超过此距离(度)的AI方法权重降为1/10
-        OUTLIER_THRESHOLD_DEG = 5.0   # ~550km
-        OUTLIER_PENALTY = 0.1          # 异常方法权重保留比例
+        # 异常值剔除阈值：偏离机构共识超过此距离(度)的AI方法权重骤降
+        # 3°≈330km，如果AI方法比机构共识慢330km以上就惩罚
+        OUTLIER_THRESHOLD_DEG = 3.0   # ~330km（降低阈值，更早惩罚慢速AI方法）
+        OUTLIER_PENALTY = 0.05         # 异常方法权重保留比例（从0.1降到0.05，惩罚更狠）
 
         dt = 6
         results = []
@@ -1696,15 +1697,16 @@ class TyphoonPredictor:
 
     @staticmethod
     def _trend_extrapolation(points, hours):
-        """趋势外推法 - 基于最近几个数据点的移动趋势"""
+        """趋势外推法 - 基于最近几个数据点的移动趋势
+        修正：增加纬度加速因子 + 按时间标准化加速度"""
         # 取最近 N 个点计算趋势
-        n = min(6, len(points))
+        n = min(8, len(points))
         recent = points[-n:]
 
-        # 计算平均移动向量
-        total_lat_delta = 0
-        total_lng_delta = 0
-        total_time_delta = 0
+        # 计算平均移动向量（度/小时）
+        total_lat_rate = 0
+        total_lng_rate = 0
+        valid_steps = 0
 
         for i in range(1, len(recent)):
             dlat = recent[i]['lat'] - recent[i-1]['lat']
@@ -1719,30 +1721,60 @@ class TyphoonPredictor:
                 dt_hours = 3  # 默认3小时间隔
 
             if dt_hours > 0:
-                total_lat_delta += dlat / dt_hours
-                total_lng_delta += dlng / dt_hours
-                total_time_delta += dt_hours
+                total_lat_rate += dlat / dt_hours
+                total_lng_rate += dlng / dt_hours
+                valid_steps += 1
 
-        avg_lat_rate = total_lat_delta / (n - 1) if n > 1 else 0  # 度/小时
-        avg_lng_rate = total_lng_delta / (n - 1) if n > 1 else 0
+        avg_lat_rate = total_lat_rate / max(valid_steps, 1) if valid_steps > 0 else 0  # 度/小时
+        avg_lng_rate = total_lng_rate / max(valid_steps, 1) if valid_steps > 0 else 0
 
-        # 计算加速度（趋势变化）
+        # 计算加速度（按时间标准化）—— 前半段 vs 后半段的速度差异
         if len(recent) >= 4:
             half = len(recent) // 2
             first_half = recent[:half]
             second_half = recent[half:]
 
+            # 前半段平均速度（度/小时）
             rate1_lat = rate1_lng = 0
-            rate2_lat = rate2_lng = 0
+            steps1 = 0
             for i in range(1, len(first_half)):
-                rate1_lat += first_half[i]['lat'] - first_half[i-1]['lat']
-                rate1_lng += first_half[i]['lng'] - first_half[i-1]['lng']
-            for i in range(1, len(second_half)):
-                rate2_lat += second_half[i]['lat'] - second_half[i-1]['lat']
-                rate2_lng += second_half[i]['lng'] - second_half[i-1]['lng']
+                dlat = first_half[i]['lat'] - first_half[i-1]['lat']
+                dlng = first_half[i]['lng'] - first_half[i-1]['lng']
+                try:
+                    dt_h = (datetime.fromisoformat(first_half[i]['time'].replace('Z', '+00:00')) -
+                            datetime.fromisoformat(first_half[i-1]['time'].replace('Z', '+00:00'))).total_seconds() / 3600
+                except:
+                    dt_h = 3
+                if dt_h > 0:
+                    rate1_lat += dlat / dt_h
+                    rate1_lng += dlng / dt_h
+                    steps1 += 1
 
-            accel_lat = (rate2_lat - rate1_lat) / max(len(first_half)-1, 1)
-            accel_lng = (rate2_lng - rate1_lng) / max(len(first_half)-1, 1)
+            # 后半段平均速度（度/小时）
+            rate2_lat = rate2_lng = 0
+            steps2 = 0
+            for i in range(1, len(second_half)):
+                dlat = second_half[i]['lat'] - second_half[i-1]['lat']
+                dlng = second_half[i]['lng'] - second_half[i-1]['lng']
+                try:
+                    dt_h = (datetime.fromisoformat(second_half[i]['time'].replace('Z', '+00:00')) -
+                            datetime.fromisoformat(second_half[i-1]['time'].replace('Z', '+00:00'))).total_seconds() / 3600
+                except:
+                    dt_h = 3
+                if dt_h > 0:
+                    rate2_lat += dlat / dt_h
+                    rate2_lng += dlng / dt_h
+                    steps2 += 1
+
+            # 速度变化（度/小时²）：后半段速度 - 前半段速度 / 时间跨度
+            avg_rate1_lat = rate1_lat / max(steps1, 1)
+            avg_rate1_lng = rate1_lng / max(steps1, 1)
+            avg_rate2_lat = rate2_lat / max(steps2, 1)
+            avg_rate2_lng = rate2_lng / max(steps2, 1)
+
+            # 加速度 = 速度变化率（度/小时²），保守估计：只用一小部分
+            accel_lat = (avg_rate2_lat - avg_rate1_lat) * 0.15  # 度/小时², 15%权重
+            accel_lng = (avg_rate2_lng - avg_rate1_lng) * 0.15
         else:
             accel_lat = 0
             accel_lng = 0
@@ -1757,9 +1789,29 @@ class TyphoonPredictor:
             # 台风不会因为预测久了就减速停下！
             decay = math.exp(-h / (hours * 1.5))
 
-            # 线性外推：速度 * 时间，不衰减
-            pred_lat = last_point['lat'] + avg_lat_rate * h + accel_lat * h * 0.5
-            pred_lng = last_point['lng'] + avg_lng_rate * h + accel_lng * h * 0.5
+            # ★ 纬度加速因子：只影响北上速度，不影响经向速度
+            # NW Pacific台风北上时受副高西侧引导气流加速
+            # 实测：台风移速从10°N到30°N北上速度约增加1倍
+            pred_lat_est = last_point['lat'] + avg_lat_rate * h  # 估计到达的纬度
+            lat_speed_boost = 1.0 + 1.0 * max(0, pred_lat_est - 10) / 20  # 从10°N到30°N北上速度翻倍
+
+            # ★ 最低北上速度保障：台风在NW Pacific最低北上速度约0.13°/h(≈15km/h)
+            MIN_POLEWARD_RATE = 0.13  # 度/小时 (≈15km/h)
+            effective_lat_rate = max(avg_lat_rate * lat_speed_boost + accel_lat * h * 0.3, MIN_POLEWARD_RATE)
+
+            # ★ 转向修正：台风北上到25°N+时，西移减速并转为东移（副高断裂+西风带引导）
+            # 修正因子：纬度越高，西移越弱（逐渐转向东北）
+            if pred_lat_est > 20:
+                recurvature = min((pred_lat_est - 20) / 20, 1.0)  # 从20°N到40°N逐渐完全转向
+                # 西移速度逐渐衰减，最终变为东移
+                effective_lng_rate = avg_lng_rate * (1.0 - recurvature * 0.8) + accel_lng * h * 0.3
+                # 北上速度额外加转向东移分量
+                effective_lat_rate += recurvature * 0.05  # 转向时北上略加速
+            else:
+                effective_lng_rate = avg_lng_rate + accel_lng * h * 0.3
+
+            pred_lat = last_point['lat'] + effective_lat_rate * h
+            pred_lng = last_point['lng'] + effective_lng_rate * h
 
             # 压力和风速趋势预测
             recent_pressures = [p.get('pressure', 0) for p in recent if p.get('pressure')]
@@ -1815,15 +1867,31 @@ class TyphoonPredictor:
 
         params = TyphoonPredictor.STEERING_FLOW_PARAMS[season]
 
-        # 计算当前移动向量
-        n = min(4, len(points))
+        # 计算当前移动向量 —— 按时间标准化为度/小时
+        n = min(6, len(points))
         recent = points[-n:]
-        move_lat = move_lng = 0
+        move_lat_rate = move_lng_rate = 0
+        valid_steps = 0
         for i in range(1, len(recent)):
-            move_lat += recent[i]['lat'] - recent[i-1]['lat']
-            move_lng += recent[i]['lng'] - recent[i-1]['lng']
-        move_lat /= max(n-1, 1)
-        move_lng /= max(n-1, 1)
+            dlat = recent[i]['lat'] - recent[i-1]['lat']
+            dlng = recent[i]['lng'] - recent[i-1]['lng']
+            try:
+                t1 = datetime.fromisoformat(recent[i]['time'].replace('Z', '+00:00'))
+                t2 = datetime.fromisoformat(recent[i-1]['time'].replace('Z', '+00:00'))
+                dt_h = (t1 - t2).total_seconds() / 3600
+            except:
+                dt_h = 3  # 默认3小时
+            if dt_h > 0:
+                move_lat_rate += dlat / dt_h  # 度/小时
+                move_lng_rate += dlng / dt_h
+                valid_steps += 1
+
+        if valid_steps > 0:
+            move_lat_rate /= valid_steps
+            move_lng_rate /= valid_steps
+        else:
+            move_lat_rate = 0
+            move_lng_rate = 0
 
         # 科里奥利参数 (简化)
         omega = 7.292e-5  # 地球自转角速度
@@ -1845,14 +1913,24 @@ class TyphoonPredictor:
             # 置信度衰减，不影响位置计算
             decay = math.exp(-h / (hours * 2))
 
-            # 预测位置: 引导气流 + beta漂移（线性外推，不衰减）
-            pred_lat = current_lat + (move_lat * 2 + beta_n) * dt
-            pred_lng = current_lng + (move_lng * 2 - beta_w) * dt
+            # ★ 纬度加速因子：只影响北上速度（极向分量），不影响经向速度
+            # NW Pacific台风北上时受副高西侧引导气流加速北上
+            # 实测：台风北上速度从10°N到30°N约翻倍
+            speed_boost = 1.0 + 1.0 * max(0, current_lat - 10) / 20  # 从10°N到30°N北上速度翻倍
+            MIN_POLEWARD_RATE = 0.13  # 度/小时 (≈15km/h) 最低北上速度保障
+            effective_lat_rate = max(move_lat_rate * speed_boost, MIN_POLEWARD_RATE)
 
-            # 当台风接近陆地或高纬度时，偏向东北转向
-            if pred_lat > 25:
-                recurvature_factor = min((pred_lat - 25) / 15, 1.0) * 0.5
-                pred_lng += recurvature_factor * dt * 0.3  # 向东偏转
+            # ★ 转向修正：高纬时西移减速并转为东移（副高断裂+西风带引导）
+            if current_lat > 20:
+                recurvature = min((current_lat - 20) / 20, 1.0)  # 20°N→40°N逐渐完全转向
+                effective_lng_rate = move_lng_rate * (1.0 - recurvature * 0.8)
+                effective_lat_rate += recurvature * 0.05  # 转向时北上略加速
+            else:
+                effective_lng_rate = move_lng_rate
+
+            # 预测位置: 引导气流(度/小时) × dt(小时) + beta漂移 × dt
+            pred_lat = current_lat + (effective_lat_rate + beta_n) * dt
+            pred_lng = current_lng + (effective_lng_rate - beta_w) * dt
 
             # 强度预测: 基于海温简化模型
             # 海上台风增强，登陆后减弱
