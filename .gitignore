@@ -180,9 +180,14 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
-# 项目特定：数据和模型不提交（通过Docker volume持久化）
+# 项目特定：数据不提交（通过Docker volume持久化）
 data/
+
+# 模型文件（体积小，纳入版本控制以确保Docker部署可用）
+# 注意：backend/models/ 中的训练好的模型需要提交
 models/
+!backend/models/
+!backend/models/**
 
 # macOS
 .DS_Store
