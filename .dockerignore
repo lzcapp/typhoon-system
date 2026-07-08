@@ -2,9 +2,10 @@
 .git
 .gitignore
 
-# 数据和模型（通过volume持久化，不打包进镜像）
+# 数据（通过volume持久化，不打包进镜像）
 data/
-models/
+# 注意: backend/models/ 中的LSTM模型文件需要打包进镜像(486KB)
+# 不要排除 models/ 目录，否则Docker镜像内缺少lstm_best.pt
 
 # Python缓存
 __pycache__/
