@@ -290,13 +290,48 @@ class TyphoonPredictor:
         predictions = {}
         last_point = points[-1]
 
-        # 1. 趋势外推（本地计算，秒级）
-        if method in ['trend', 'ensemble', 'all']:
-            predictions['trend'] = TyphoonPredictor._trend_extrapolation(points, hours)
+        # ★★★ 机构速度校准：从机构预报提取共识移动速度 ★★★
+        # 核心思路：AI方法（trend/physics）只能从过去数据推断速度，
+        # 但NWP模型可以预测未来加速。当机构预报可用时，
+        # 用机构共识速度校准AI预测速度，避免AI方法系统性偏慢。
+        agency_speed_calibration = None
+        forecasts = typhoon_data.get('forecasts', {})
+        if forecasts:
+            agency_lat_rates = []
+            agency_lng_rates = []
+            for agency, fc_data in forecasts.items():
+                fcpts = fc_data.get('points', [])
+                if len(fcpts) >= 2:
+                    try:
+                        t0 = datetime.fromisoformat(fcpts[0]['time'].replace('Z', '+00:00'))
+                        t_last = datetime.fromisoformat(fcpts[-1]['time'].replace('Z', '+00:00'))
+                        dt_total = (t_last - t0).total_seconds() / 3600
+                        if dt_total > 12:  # 至少12小时才有意义
+                            dlat = fcpts[-1]['lat'] - fcpts[0]['lat']
+                            dlng = fcpts[-1]['lng'] - fcpts[0]['lng']
+                            agency_lat_rates.append(dlat / dt_total)
+                            agency_lng_rates.append(dlng / dt_total)
+                    except:
+                        pass
+            if agency_lat_rates:
+                # 机构共识速度（度/小时）
+                agency_speed_calibration = {
+                    'lat_rate': sum(agency_lat_rates) / len(agency_lat_rates),
+                    'lng_rate': sum(agency_lng_rates) / len(agency_lng_rates),
+                    'n_agencies': len(agency_lat_rates),
+                }
 
-        # 2. 物理模型（本地计算，秒级）
+        # 1. 趋势外推（本地计算，秒级）—— 用机构速度校准
+        if method in ['trend', 'ensemble', 'all']:
+            predictions['trend'] = TyphoonPredictor._trend_extrapolation(
+                points, hours, agency_speed_calibration
+            )
+
+        # 2. 物理模型（本地计算，秒级）—— 用机构速度校准
         if method in ['physics', 'ensemble', 'all']:
-            predictions['physics'] = TyphoonPredictor._physics_model(points, hours)
+            predictions['physics'] = TyphoonPredictor._physics_model(
+                points, hours, agency_speed_calibration
+            )
 
         # 3. NWP涡旋追踪 —— 并发调用多个NWP模型（GFS、ECMWF等）
         #    串行调用每个耗时10-20秒，并发后总耗时等于最慢的单次调用
@@ -1696,9 +1731,10 @@ class TyphoonPredictor:
         return result
 
     @staticmethod
-    def _trend_extrapolation(points, hours):
+    def _trend_extrapolation(points, hours, agency_calibration=None):
         """趋势外推法 - 基于最近几个数据点的移动趋势
-        修正：增加纬度加速因子 + 按时间标准化加速度"""
+        修正：增加纬度加速因子 + 按时间标准化加速度 + 机构速度校准
+        agency_calibration: 当机构预报可用时，提供共识速度校准，避免系统性偏慢"""
         # 取最近 N 个点计算趋势
         n = min(8, len(points))
         recent = points[-n:]
@@ -1727,6 +1763,28 @@ class TyphoonPredictor:
 
         avg_lat_rate = total_lat_rate / max(valid_steps, 1) if valid_steps > 0 else 0  # 度/小时
         avg_lng_rate = total_lng_rate / max(valid_steps, 1) if valid_steps > 0 else 0
+
+        # ★★★ 机构速度校准 ★★★
+        # 当机构预报可用时，混合机构共识速度与观测速度
+        # 混合比例: 机构70% + 观测30%（机构NWP模型能预测未来加速，观测只反映过去）
+        # 如果观测速度比机构快（台风已加速），则尊重观测数据（混合比例反转）
+        if agency_calibration:
+            a_lat = agency_calibration['lat_rate']
+            a_lng = agency_calibration['lng_rate']
+
+            # 判断哪个更快：如果观测速度已经比机构共识快（台风已加速），尊重观测
+            obs_speed = math.sqrt(avg_lat_rate**2 + avg_lng_rate**2)
+            agency_speed = math.sqrt(a_lat**2 + a_lng**2)
+
+            if obs_speed >= agency_speed:
+                # 观测已经更快（台风已加速到机构预期水平），尊重观测
+                blend_ratio = 0.4  # 机构40%，观测60%
+            else:
+                # 观测比机构慢（台风还没加速），用机构速度主导
+                blend_ratio = 0.7  # 机构70%，观测30%
+
+            avg_lat_rate = blend_ratio * a_lat + (1 - blend_ratio) * avg_lat_rate
+            avg_lng_rate = blend_ratio * a_lng + (1 - blend_ratio) * avg_lng_rate
 
         # 计算加速度（按时间标准化）—— 前半段 vs 后半段的速度差异
         if len(recent) >= 4:
@@ -1779,74 +1837,94 @@ class TyphoonPredictor:
             accel_lat = 0
             accel_lng = 0
 
-        # 生成预测点
+        # 生成预测点 —— 增量式计算
+        # ★★★ 核心设计：
+        #   有机构校准：直接使用校准后的速度，不再叠加纬度加速
+        #     （机构NWP模型已预测了未来加速，不需要我们再猜测）
+        #   无机构校准：观测速度+极小增量加速（避免正反馈爆炸）
+        #     加速因子只补偿"从当前纬度起再增加的加速"，不从头起算
         last_point = points[-1]
         predictions = []
         dt = 6  # 每6小时一个预测点
 
-        for h in range(dt, hours + 1, dt):
+        current_lat = last_point['lat']
+        current_lng = last_point['lng']
+        current_pressure = last_point.get('pressure', 1000)
+        current_wind = last_point.get('wind_speed', 0)
+
+        # 计算压力/风速趋势（每6h步的变化量）
+        recent_pressures = [p.get('pressure', 0) for p in recent if p.get('pressure')]
+        recent_winds = [p.get('wind_speed', 0) for p in recent if p.get('wind_speed')]
+        p_rate_per_6h = 0
+        w_rate_per_6h = 0
+        if len(recent_pressures) >= 2:
+            p_rate_per_6h = (recent_pressures[-1] - recent_pressures[0]) / max(len(recent_pressures)-1, 1) * 2
+        if len(recent_winds) >= 2:
+            w_rate_per_6h = (recent_winds[-1] - recent_winds[0]) / max(len(recent_winds)-1, 1) * 2
+
+        try:
+            base_time = datetime.fromisoformat(last_point['time'].replace('Z', '+00:00'))
+        except:
+            base_time = datetime.now()
+
+        # 记录起始纬度（用于计算增量加速）
+        start_lat = current_lat
+
+        for step in range(1, hours // dt + 1):
+            h = step * dt
+
             # 置信度衰减因子：仅影响confidence，不影响位置
-            # 台风不会因为预测久了就减速停下！
             decay = math.exp(-h / (hours * 1.5))
 
-            # ★ 纬度加速因子：只影响北上速度，不影响经向速度
-            # NW Pacific台风北上时受副高西侧引导气流加速
-            # 实测：台风移速从10°N到30°N北上速度约增加1倍
-            pred_lat_est = last_point['lat'] + avg_lat_rate * h  # 估计到达的纬度
-            lat_speed_boost = 1.0 + 1.0 * max(0, pred_lat_est - 10) / 20  # 从10°N到30°N北上速度翻倍
-
-            # ★ 最低北上速度保障：台风在NW Pacific最低北上速度约0.13°/h(≈15km/h)
-            MIN_POLEWARD_RATE = 0.13  # 度/小时 (≈15km/h)
-            effective_lat_rate = max(avg_lat_rate * lat_speed_boost + accel_lat * h * 0.3, MIN_POLEWARD_RATE)
-
-            # ★ 转向修正：台风北上到25°N+时，西移减速并转为东移（副高断裂+西风带引导）
-            # 修正因子：纬度越高，西移越弱（逐渐转向东北）
-            if pred_lat_est > 20:
-                recurvature = min((pred_lat_est - 20) / 20, 1.0)  # 从20°N到40°N逐渐完全转向
-                # 西移速度逐渐衰减，最终变为东移
-                effective_lng_rate = avg_lng_rate * (1.0 - recurvature * 0.8) + accel_lng * h * 0.3
-                # 北上速度额外加转向东移分量
-                effective_lat_rate += recurvature * 0.05  # 转向时北上略加速
+            # ★ 纬度加速策略（取决于是否有机构校准）
+            if agency_calibration:
+                # 有机构校准：NWP模型已预测未来加速，不再叠加额外加速
+                # 只在极北纬度(>35°N)加微小转向加速
+                effective_lat_rate = avg_lat_rate
+                if current_lat > 35:
+                    effective_lat_rate += 0.03  # 极北区域转向时略加速
+                effective_lng_rate = avg_lng_rate
             else:
-                effective_lng_rate = avg_lng_rate + accel_lng * h * 0.3
+                # 无机构校准：保守的增量加速
+                # 只补偿"从当前纬度起额外增加的加速"
+                # NW Pacific实测：每10°纬度北上速度约增加25-30%
+                # 但只用15%/10°避免正反馈（观测速度已包含部分加速）
+                lat_progress = max(0, current_lat - start_lat)
+                small_boost = 1.0 + 0.015 * lat_progress  # 每北移10°增加15%
+                MIN_RATE = 0.13  # 度/小时 ≈ 15km/h
+                effective_lat_rate = max(avg_lat_rate * small_boost, MIN_RATE)
+                effective_lng_rate = avg_lng_rate
 
-            pred_lat = last_point['lat'] + effective_lat_rate * h
-            pred_lng = last_point['lng'] + effective_lng_rate * h
+            # ★ 转向修正：基于当前纬度
+            if current_lat > 25:
+                recurvature = min((current_lat - 25) / 15, 1.0)  # 25°N→40°N逐渐转向
+                # 西移逐渐减弱，东移分量增加
+                effective_lng_rate = effective_lng_rate * (1.0 - recurvature * 0.6) + recurvature * 0.15
 
-            # 压力和风速趋势预测
-            recent_pressures = [p.get('pressure', 0) for p in recent if p.get('pressure')]
-            recent_winds = [p.get('wind_speed', 0) for p in recent if p.get('wind_speed')]
+            # 增量更新位置
+            current_lat += effective_lat_rate * dt
+            current_lng += effective_lng_rate * dt
+            current_pressure += p_rate_per_6h
+            current_wind += w_rate_per_6h
 
-            pred_pressure = last_point.get('pressure', 0)
-            pred_wind = last_point.get('wind_speed', 0)
-            if len(recent_pressures) >= 2:
-                p_rate = (recent_pressures[-1] - recent_pressures[0]) / max(len(recent_pressures)-1, 1)
-                pred_pressure = last_point.get('pressure', 0) + p_rate * h
-            if len(recent_winds) >= 2:
-                w_rate = (recent_winds[-1] - recent_winds[0]) / max(len(recent_winds)-1, 1)
-                pred_wind = last_point.get('wind_speed', 0) + w_rate * h
-
-            try:
-                base_time = datetime.fromisoformat(last_point['time'].replace('Z', '+00:00'))
-                pred_time = (base_time + timedelta(hours=h)).isoformat()
-            except:
-                pred_time = f"+{h}h"
+            pred_time = (base_time + timedelta(hours=h)).isoformat()
 
             predictions.append({
                 'time': pred_time,
-                'lat': round(pred_lat, 1),
-                'lng': round(pred_lng, 1),
-                'pressure': round(pred_pressure),
-                'wind_speed': round(pred_wind, 1),
-                'category': TyphoonPredictor._intensity_category(pred_pressure, pred_wind),
+                'lat': round(current_lat, 1),
+                'lng': round(current_lng, 1),
+                'pressure': round(current_pressure),
+                'wind_speed': round(max(0, current_wind), 1),
+                'category': TyphoonPredictor._intensity_category(current_pressure, current_wind),
                 'confidence': round(0.85 * decay, 2),
             })
 
         return predictions
 
     @staticmethod
-    def _physics_model(points, hours):
-        """物理模型预测 - Beta漂移 + 引导气流 + 简化科里奥利力"""
+    def _physics_model(points, hours, agency_calibration=None):
+        """物理模型预测 - Beta漂移 + 引导气流 + 简化科里奥利力
+        agency_calibration: 机构共识速度校准，避免预测偏慢"""
         last = points[-1]
         lat = last['lat']
         lng = last['lng']
@@ -1893,6 +1971,19 @@ class TyphoonPredictor:
             move_lat_rate = 0
             move_lng_rate = 0
 
+        # ★★★ 机构速度校准 ★★★
+        if agency_calibration:
+            a_lat = agency_calibration['lat_rate']
+            a_lng = agency_calibration['lng_rate']
+            obs_speed = math.sqrt(move_lat_rate**2 + move_lng_rate**2)
+            agency_speed = math.sqrt(a_lat**2 + a_lng**2)
+            if obs_speed >= agency_speed:
+                blend_ratio = 0.4
+            else:
+                blend_ratio = 0.7
+            move_lat_rate = blend_ratio * a_lat + (1 - blend_ratio) * move_lat_rate
+            move_lng_rate = blend_ratio * a_lng + (1 - blend_ratio) * move_lng_rate
+
         # 科里奥利参数 (简化)
         omega = 7.292e-5  # 地球自转角速度
         f = 2 * omega * math.sin(math.radians(lat))
@@ -1908,25 +1999,30 @@ class TyphoonPredictor:
         current_lng = lng
         current_pressure = last.get('pressure', 1000)
         current_wind = last.get('wind_speed', 0)
+        start_lat = current_lat  # 记录起始纬度
 
         for h in range(dt, hours + 1, dt):
             # 置信度衰减，不影响位置计算
             decay = math.exp(-h / (hours * 2))
 
-            # ★ 纬度加速因子：只影响北上速度（极向分量），不影响经向速度
-            # NW Pacific台风北上时受副高西侧引导气流加速北上
-            # 实测：台风北上速度从10°N到30°N约翻倍
-            speed_boost = 1.0 + 1.0 * max(0, current_lat - 10) / 20  # 从10°N到30°N北上速度翻倍
-            MIN_POLEWARD_RATE = 0.13  # 度/小时 (≈15km/h) 最低北上速度保障
-            effective_lat_rate = max(move_lat_rate * speed_boost, MIN_POLEWARD_RATE)
-
-            # ★ 转向修正：高纬时西移减速并转为东移（副高断裂+西风带引导）
-            if current_lat > 20:
-                recurvature = min((current_lat - 20) / 20, 1.0)  # 20°N→40°N逐渐完全转向
-                effective_lng_rate = move_lng_rate * (1.0 - recurvature * 0.8)
-                effective_lat_rate += recurvature * 0.05  # 转向时北上略加速
-            else:
+            # ★ 纬度加速策略（与趋势法相同：有机构校准时不叠加额外加速）
+            if agency_calibration:
+                effective_lat_rate = move_lat_rate
+                if current_lat > 35:
+                    effective_lat_rate += 0.03
                 effective_lng_rate = move_lng_rate
+            else:
+                # 保守增量加速（避免正反馈爆炸）
+                lat_progress = max(0, current_lat - start_lat)
+                small_boost = 1.0 + 0.015 * lat_progress
+                MIN_RATE = 0.13
+                effective_lat_rate = max(move_lat_rate * small_boost, MIN_RATE)
+                effective_lng_rate = move_lng_rate
+
+            # ★ 转向修正：高纬时西移减速并转为东移
+            if current_lat > 25:
+                recurvature = min((current_lat - 25) / 15, 1.0)  # 25°N→40°N逐渐转向
+                effective_lng_rate = effective_lng_rate * (1.0 - recurvature * 0.6) + recurvature * 0.15
 
             # 预测位置: 引导气流(度/小时) × dt(小时) + beta漂移 × dt
             pred_lat = current_lat + (effective_lat_rate + beta_n) * dt
