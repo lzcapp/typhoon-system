@@ -21,6 +21,11 @@ build/
 *.swp
 *.swo
 
+# 大型模型权重（通过entrypoint自动下载+volume持久化，不打包进镜像）
+*.onnx
+# initial_data缓存也不打包
+initial_data/
+
 # 系统文件
 .DS_Store
 Thumbs.db

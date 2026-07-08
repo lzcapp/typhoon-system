@@ -47,9 +47,10 @@ RUN pip install --no-cache-dir "onnxruntime>=1.17" || \
     echo "⚠️ onnxruntime安装失败，Pangu-Weather推理不可用" \
     && rm -rf /root/.cache/pip
 
-# 复制应用代码
+# 复制应用代码和启动脚本
 COPY backend/ /app/backend/
 COPY static/ /app/static/
+COPY entrypoint.sh /app/entrypoint.sh
 
 # 创建数据目录(含ECMWF BUFR缓存和GRIB2缓存)
 RUN mkdir -p /app/data/isc /app/data/nii /app/data/predictions /app/data/hashes \
@@ -61,10 +62,9 @@ ENV PYTHONUNBUFFERED=1
 # 暴露端口
 EXPOSE 8088
 
-# 健康检查
-HEALTHCHECK --interval=60s --timeout=10s --start-period=30s \
+# 健康检查(延长start_period，首次启动下载模型需要时间)
+HEALTHCHECK --interval=60s --timeout=10s --start-period=120s \
     CMD curl -f http://localhost:8088/api/data/status || exit 1
 
-# 启动命令
-WORKDIR /app/backend
-CMD ["python", "app.py"]
+# 使用entrypoint脚本启动(自动检测并下载模型)
+ENTRYPOINT ["/app/entrypoint.sh"]
