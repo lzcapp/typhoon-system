@@ -633,6 +633,8 @@ const PRED_COLORS = {
   physics: '#a855f7',
   gfs: '#f59e0b',
   ecmwf: '#06b6d4',
+  ecmwf_bufr: '#00d4aa',
+  ecmwf_bufr_ens: '#00b89c',
   aifs: '#14b8a6',
   cma: '#f97316',
   gfs_graphcast: '#ef4444',
@@ -651,6 +653,8 @@ function initApp() {
   // 首次进入：默认加载本年度数据 + 自动缓存 + 检查活跃台风
   loadDefaultYearData();
   checkLSTMStatus();
+  checkECMWFBUFRStatus();
+  checkPanguStatus();
   // 自动刷新：每5分钟检查活跃台风
   startAutoRefresh();
 }
@@ -1131,6 +1135,7 @@ function renderTyphoonDetail(t) {
         <button class="pred-btn ${activePredictionMethod==='analog'?'active':''}" onclick="setPredMethod('analog')">历史类比</button>
         <button class="pred-btn ${activePredictionMethod==='lstm'?'active':''}" onclick="setPredMethod('lstm')">🧠 LSTM</button>
         <button class="pred-btn ${activePredictionMethod==='pangu'?'active':''}" onclick="setPredMethod('pangu')">🔮 盘古</button>
+        <button class="pred-btn ${activePredictionMethod==='ecmwf_bufr'?'active':''}" onclick="setPredMethod('ecmwf_bufr')">🌍 ECMWF官方</button>
         <button class="pred-btn ${activePredictionMethod==='ensemble'?'active':''}" onclick="setPredMethod('ensemble')">综合融合</button>
         <button class="pred-btn ${activePredictionMethod==='all'?'active':''}" onclick="setPredMethod('all')">全部方法</button>
       </div>
@@ -1148,6 +1153,11 @@ function renderTyphoonDetail(t) {
           <i class="fas fa-cogs"></i> 训练LSTM模型（需ISC数据）
         </button>
         <span id="lstmStatus" style="font-size:12px;color:var(--text-secondary);margin-left:6px"></span>
+      </div>
+      <div style="margin-top:6px;font-size:12px;color:var(--text-secondary)">
+        <span id="ecmwfBufrStatus"></span>
+        <br>
+        <span id="panguStatus"></span>
       </div>
     </div>`;
 
@@ -1428,7 +1438,7 @@ function renderForecastOnMap(t, agency) {
 function setPredMethod(method) {
   activePredictionMethod = method;
   document.querySelectorAll('.pred-btn').forEach(el => {
-    const map = {'趋势':'trend','物理':'physics','GFS':'gfs','AIFS':'aifs','CMA':'cma','GraphCast':'gfs_graphcast','历史':'analog','LSTM':'lstm','盘古':'pangu','综合':'ensemble','全部':'all'};
+    const map = {'趋势':'trend','物理':'physics','GFS':'gfs','AIFS':'aifs','CMA':'cma','GraphCast':'gfs_graphcast','历史':'analog','LSTM':'lstm','盘古':'pangu','ECMWF官方':'ecmwf_bufr','ECMWF BUFR':'ecmwf_bufr','ECMWF BUFR ENS':'ecmwf_bufr_ens','综合':'ensemble','全部':'all'};
     const key = Object.keys(map).find(k => el.textContent.includes(k));
     el.classList.toggle('active', key && map[key] === method);
   });
@@ -1501,6 +1511,48 @@ async function checkLSTMStatus() {
   }
 }
 
+async function checkECMWFBUFRStatus() {
+  try {
+    const resp = await fetch(`${API_BASE}/api/ecmwf/bufr/status`);
+    const status = await resp.json();
+    const el = document.getElementById('ecmwfBufrStatus');
+    if (el) {
+      if (status.bufr_available) {
+        el.textContent = '✅ ECMWF BUFR数据源可用';
+        el.style.color = '#00d4aa';
+      } else {
+        const deps = status.dependencies || {};
+        const missing = [];
+        if (!deps.ecmwf_opendata) missing.push('ecmwf-opendata');
+        if (!deps.pdbufr && !deps.eccodes) missing.push('eccodes/pdbufr');
+        el.textContent = '⚠️ ECMWF BUFR不可用(缺: ' + missing.join(', ') + ')';
+        el.style.color = '#f59e0b';
+      }
+    }
+  } catch(e) {
+    console.log('ECMWF BUFR status check failed', e);
+  }
+}
+
+async function checkPanguStatus() {
+  try {
+    const resp = await fetch(`${API_BASE}/api/data/status`);
+    const status = await resp.json();
+    const el = document.getElementById('panguStatus');
+    if (el) {
+      if (status.pangu_ready) {
+        el.textContent = '✅ 盘古大模型权重已下载';
+        el.style.color = '#8b5cf6';
+      } else {
+        el.textContent = '⚠️ 盘古大模型权重未下载(需~2.2GB ONNX文件)';
+        el.style.color = '#f59e0b';
+      }
+    }
+  } catch(e) {
+    console.log('Pangu status check failed', e);
+  }
+}
+
 async function trainLSTM() {
   showLoading('正在训练LSTM模型，可能需要1-3分钟...');
   try {
@@ -1545,7 +1597,7 @@ async function loadAndRenderPrediction(tfbh, hours, method) {
     if (!points || !points.length) continue;
 
     const color = PRED_COLORS[methodKey] || '#888';
-    const label = methodKey === 'trend' ? '趋势外推' : methodKey === 'physics' ? '物理模型' : methodKey === 'ensemble' ? 'Kalman融合' : methodKey === 'gfs' ? 'GFS数值预报' : methodKey === 'ecmwf' ? 'ECMWF IFS' : methodKey === 'aifs' ? 'ECMWF AIFS' : methodKey === 'cma' ? 'CMA GRAPES' : methodKey === 'gfs_graphcast' ? 'GraphCast AI' : methodKey === 'analog' ? '历史类比' : methodKey === 'lstm' ? 'LSTM深度学习' : methodKey === 'pangu' ? '盘古大模型' : methodKey;
+    const label = methodKey === 'trend' ? '趋势外推' : methodKey === 'physics' ? '物理模型' : methodKey === 'ensemble' ? 'Kalman融合' : methodKey === 'gfs' ? 'GFS数值预报' : methodKey === 'ecmwf' ? 'ECMWF IFS' : methodKey === 'ecmwf_bufr' ? 'ECMWF官方轨迹' : methodKey === 'ecmwf_bufr_ens' ? 'ECMWF ENS均值' : methodKey === 'aifs' ? 'ECMWF AIFS' : methodKey === 'cma' ? 'CMA GRAPES' : methodKey === 'gfs_graphcast' ? 'GraphCast AI' : methodKey === 'analog' ? '历史类比' : methodKey === 'lstm' ? 'LSTM深度学习' : methodKey === 'pangu' ? '盘古大模型' : methodKey;
 
     // 绘制预测路径
     const coords = [[data.base_lat, data.base_lng]];

@@ -17,6 +17,7 @@ import requests as req_lib
 # LSTM深度学习预测模块
 from lstm_predictor import lstm_predict, is_lstm_ready, LSTMTrainer, WINDOW_SIZE
 from pangu_predictor import pangu_predict, is_pangu_ready
+from ecmwf_bufr_fetcher import fetch_ecmwf_tracks_for_typhoon, get_ecmwf_active_storms, is_bufr_available
 
 # 海岸线 & 登陆检测
 from coastline import detect_landfall_from_segments, detect_landfall, get_coastline_geojson
@@ -384,6 +385,21 @@ class TyphoonPredictor:
             pangu_pred = TyphoonPredictor._pangu_prediction(typhoon_data, hours)
             if pangu_pred:
                 predictions['pangu'] = pangu_pred
+
+        # 8. ECMWF BUFR官方台风轨迹预报（最高精度数据源）
+        #    直接获取ECMWF官方的台风路径预测，无需自建NWP
+        if method in ['ecmwf_bufr', 'ensemble', 'all']:
+            bufr_tracks = fetch_ecmwf_tracks_for_typhoon(
+                last_point.get('lat', 0), last_point.get('lng', 0),
+                hours=hours
+            )
+            if bufr_tracks:
+                # HRES确定性预报(全球最准)
+                if 'ecmwf_bufr' in bufr_tracks:
+                    predictions['ecmwf_bufr'] = bufr_tracks['ecmwf_bufr']
+                # ENS集合均值(不确定性更低)
+                if 'ecmwf_bufr_ens' in bufr_tracks:
+                    predictions['ecmwf_bufr_ens'] = bufr_tracks['ecmwf_bufr_ens']
 
         # ★ 关键：在ensemble融合之前，先纳入机构预报
         if typhoon_data.get('forecasts'):
@@ -1470,8 +1486,10 @@ class TyphoonPredictor:
 
         # AI方法权重（仅在机构预报总权重之外分配）
         ai_weights = {
+            'ecmwf_bufr': 0.12,   # ECMWF BUFR官方轨迹(全球最准NWP直接输出)
+            'ecmwf_bufr_ens': 0.08, # ECMWF BUFR ENS集合均值(不确定性更低)
             'pangu': 0.08,
-            'ecmwf': 0.06,      # ECMWF IFS涡旋追踪
+            'ecmwf': 0.06,      # ECMWF IFS涡旋追踪(Open-Meteo MSLP网格法)
             'aifs': 0.04,        # ECMWF AIFS AI
             'lstm': 0.04,        # LSTM深度学习
             'gfs': 0.02,         # GFS涡旋追踪
@@ -2286,6 +2304,7 @@ def data_status():
         'total_cached_files': len([f for f in os.listdir(ISC_DIR) if f.endswith('.json')]),
         'lstm_ready': is_lstm_ready(),
         'pangu_ready': is_pangu_ready(),
+        'ecmwf_bufr_available': is_bufr_available(),
     })
 
 
@@ -2587,6 +2606,15 @@ def get_prediction_methods():
             'requires_setup': True,
         },
         {
+            'id': 'ecmwf_bufr',
+            'name': 'ECMWF BUFR官方轨迹',
+            'accuracy': '极高',
+            'description': '直接获取ECMWF官方台风轨迹BUFR预报数据(24h误差~50km)，含HRES确定性预报+ENS集合均值，无需自建NWP',
+            'color': '#00d4aa',
+            'best_for': '24-240小时全时段(全球最权威NWP官方输出)',
+            'requires_dependency': True,  # 需要ecmwf-opendata+eccodes
+        },
+        {
             'id': 'ensemble',
             'name': '综合融合(含机构)',
             'accuracy': '最高',
@@ -2608,6 +2636,44 @@ def get_prediction_methods():
 def get_coastline():
     """返回NW Pacific海岸线GeoJSON（用于前端地图展示）"""
     return jsonify(get_coastline_geojson())
+
+
+@app.route('/api/ecmwf/bufr/status')
+def ecmwf_bufr_status():
+    """检查 ECMWF BUFR 数据获取功能状态"""
+    return jsonify({
+        'bufr_available': is_bufr_available(),
+        'dependencies': {
+            'ecmwf_opendata': _check_import('ecmwf.opendata'),
+            'pdbufr': _check_import('pdbufr'),
+            'eccodes': _check_import('eccodes'),
+        },
+        'description': 'ECMWF BUFR需要ecmwf-opendata+eccodes/pdbufr依赖，Docker需安装libeccodes-dev',
+    })
+
+
+@app.route('/api/ecmwf/bufr/active-storms')
+def ecmwf_bufr_active_storms():
+    """获取 ECMWF 当前追踪的活跃热带气旋"""
+    storms = get_ecmwf_active_storms()
+    return jsonify({
+        'success': True,
+        'count': len(storms),
+        'storms': storms,
+        'source': 'ECMWF Open Data BUFR',
+    })
+
+
+def _check_import(module_path):
+    """检查Python模块是否可导入"""
+    try:
+        parts = module_path.split('.')
+        mod = __import__(parts[0])
+        for part in parts[1:]:
+            mod = getattr(mod, part)
+        return True
+    except (ImportError, AttributeError):
+        return False
 
 
 @app.route('/api/landfall/<tfbh>')
