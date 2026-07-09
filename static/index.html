@@ -618,6 +618,10 @@ let showWindRadius = false;
 let activePredictionMethod = 'ensemble';
 let activeForecastAgency = null;
 
+// ★ 预加载缓存：后台已计算的活跃台风预测结果
+let preloadedCache = {};   // { tfid: { hours: { predictions, methods, fresh, computed_at } } }
+let cacheInitDone = false; // 后台初始化是否完成
+
 const CATEGORY_COLORS = {
   '热带低压(TD)': '#88bb99',
   '热带风暴(TS)': '#55dd66',
@@ -655,11 +659,19 @@ function initApp() {
   checkLSTMStatus();
   checkECMWFBUFRStatus();
   checkPanguStatus();
-  checkSchedulerStatus();  // ★ 检查后台引擎状态
+  checkSchedulerStatus();
+  // ★ 预加载后台缓存（后台已计算的活跃台风预测）
+  preloadActivePredictions();
   // 自动刷新：每5分钟检查活跃台风
   startAutoRefresh();
-  // 每2分钟刷新后台状态面板
-  setInterval(checkSchedulerStatus, 2 * 60 * 1000);
+  // 每2分钟刷新后台状态面板 + 预加载缓存
+  setInterval(() => {
+    checkSchedulerStatus();
+    preloadActivePredictions();
+  }, 2 * 60 * 1000);
+  // 每30秒检查后台初始化是否完成
+  checkInitStatus();
+  setInterval(checkInitStatus, 30 * 1000);
 }
 
 function initMap() {
@@ -912,6 +924,27 @@ async function apiCall(url, timeoutMs = 30000) {
 let lastPredictionFreshness = null;  // 记录最后一次预测数据的新鲜度
 
 async function predictApiCall(tfbh, hours, method) {
+  // ★ 第零优先级: 从预加载缓存读取（已在页面加载时批量获取）
+  const preloaded = getPreloadedPrediction(tfbh, hours);
+  if (preloaded && preloaded.predictions) {
+    const isFresh = preloaded.cache_fresh;
+    const ageMin = preloaded.cache_age_minutes || 0;
+    lastPredictionFreshness = {
+      fresh: isFresh,
+      age_minutes: ageMin,
+      computed_at: preloaded.computed_at || '',
+      source: '预加载缓存',
+    };
+    console.log(`预测从预加载缓存读取: ${tfbh} ${hours}h (${ageMin}分钟前计算)`);
+    return {
+      predictions: preloaded.predictions,
+      cache_age_minutes: ageMin,
+      cache_fresh: isFresh,
+      computed_at: preloaded.computed_at || '',
+      available_methods: preloaded.available_methods || [],
+    };
+  }
+
   // ★ 第一优先级: 查后台缓存（秒级响应）
   try {
     const cached = await apiCall(`/api/predictions/cached/${tfbh}/${hours}`, 5000);
@@ -925,19 +958,20 @@ async function predictApiCall(tfbh, hours, method) {
         source: '缓存',
       };
       
-      // 缓存新鲜(<30min): 直接返回，秒级体验
+      // 缓存新鲜: 直接返回，秒级体验
       if (isFresh) {
+        // 同时更新预加载缓存
+        if (!preloadedCache[tfbh]) preloadedCache[tfbh] = {};
+        preloadedCache[tfbh][hours] = cached;
         return cached;
       }
       
       // 缓存过时但可用: 先显示旧数据，后台触发更新
       console.log(`预测缓存过时(${ageMin}分钟)，先显示旧数据，后台更新中`);
-      // 触发后台按需计算更新缓存（下次访问就是新的了）
       fetch(`${API_BASE}/api/predictions/trigger/${tfbh}/${hours}?method=${method}`).catch(() => {});
       return cached;
     }
   } catch(e) {
-    // 缓存查询失败（5秒超时），继续实时计算
     console.log('缓存查询失败或超时，回退实时计算');
   }
 
@@ -1660,12 +1694,106 @@ async function checkSchedulerStatus() {
         <span>LSTM模型:</span><span>${lstmReady ? '✅已训练' : '⚠️未训练'}</span>
       </div>
       <div style="margin-top:4px;color:var(--text-secondary)">
-        自动: 数据1h / 预测30min / BUFR6h / 训练3:00AM
+        后台方法: ${status.background_method || 'all'} | 数据1h / 预测30min
       </div>
     `;
   } catch(e) {
     console.log('Scheduler status check failed', e);
   }
+}
+
+// ============================================================
+// ★ 预加载后台缓存 & 初始化状态检查
+// ============================================================
+
+async function preloadActivePredictions() {
+  // 批量获取所有活跃台风的缓存预测（后台已经计算好了）
+  try {
+    const resp = await fetch(`${API_BASE}/api/predictions/active-cache-all`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    const data = await resp.json();
+    if (data.success && data.data) {
+      // 存入预加载缓存
+      for (const [tfid, tfData] of Object.entries(data.data)) {
+        if (tfData.hours_data) {
+          for (const [hours, hData] of Object.entries(tfData.hours_data)) {
+            if (!preloadedCache[tfid]) preloadedCache[tfid] = {};
+            preloadedCache[tfid][hours] = hData;
+          }
+        }
+      }
+      cacheInitDone = true;
+      const cachedCount = data.cached_typhoons?.length || 0;
+      const activeCount = data.active_count || 0;
+      if (cachedCount > 0) {
+        console.log(`预加载: ${cachedCount}/${activeCount}个活跃台风有缓存预测`);
+        // 更新状态面板显示
+        updateCacheStatusBadge(cachedCount, activeCount);
+      }
+    }
+  } catch(e) {
+    console.log('预加载缓存查询失败(后台可能仍在初始化)', e);
+  }
+}
+
+async function checkInitStatus() {
+  // 检查后台启动初始化是否完成
+  try {
+    const resp = await fetch(`${API_BASE}/api/scheduler/init-status`, {
+      signal: AbortSignal.timeout(3000),
+    });
+    const data = await resp.json();
+    if (data.init_done) {
+      cacheInitDone = true;
+      const badge = document.getElementById('cacheStatusBadge');
+      if (badge) {
+        badge.textContent = `✅ 后台就绪 ${data.cached_count}缓存`;
+        badge.style.color = '#22c55e';
+      }
+    } else {
+      const badge = document.getElementById('cacheStatusBadge');
+      if (badge && !badge.textContent.includes('就绪')) {
+        badge.textContent = '⏳ 后台初始化中...';
+        badge.style.color = '#f59e0b';
+      }
+    }
+  } catch(e) {
+    console.log('Init status check failed', e);
+  }
+}
+
+function updateCacheStatusBadge(cachedCount, activeCount) {
+  let badge = document.getElementById('cacheStatusBadge');
+  if (!badge) {
+    // 在台风列表区域顶部创建缓存状态徽章
+    const listHeader = document.querySelector('.sidebar-header');
+    if (listHeader) {
+      badge = document.createElement('span');
+      badge.id = 'cacheStatusBadge';
+      badge.style.cssText = 'font-size:11px;margin-left:8px;padding:2px 6px;border-radius:4px;background:rgba(34,197,94,0.15);color:#22c55e';
+      listHeader.appendChild(badge);
+    }
+  }
+  if (badge) {
+    if (cachedCount >= activeCount) {
+      badge.textContent = `✅ 全部缓存(${cachedCount}/${activeCount})`;
+      badge.style.color = '#22c55e';
+      badge.style.background = 'rgba(34,197,94,0.15)';
+    } else {
+      badge.textContent = `⏳ 缓存中(${cachedCount}/${activeCount})`;
+      badge.style.color = '#f59e0b';
+      badge.style.background = 'rgba(245,158,11,0.15)';
+    }
+  }
+}
+
+// ★ 核心优化：优先从预加载缓存读取预测结果
+function getPreloadedPrediction(tfid, hours) {
+  if (preloadedCache[tfid] && preloadedCache[tfid][hours]) {
+    return preloadedCache[tfid][hours];
+  }
+  return null;
 }
 
 async function trainLSTM() {
@@ -1704,7 +1832,7 @@ async function loadAndRenderPrediction(tfbh, hours, method) {
   const predContainer = document.getElementById('predictionResults');
   if (!predContainer) return;
 
-  // ★ 显示数据新鲜度指标
+  // ★ 显示数据新鲜度指标 + 后台计算来源标识
   let freshnessHtml = '';
   if (lastPredictionFreshness) {
     const f = lastPredictionFreshness;
@@ -1713,7 +1841,14 @@ async function loadAndRenderPrediction(tfbh, hours, method) {
       ? `数据新鲜(${f.age_minutes}分钟前计算)` 
       : `数据${f.age_minutes}分钟前${f.source}`;
     const updateHint = f.fresh ? '' : ' — 后台正在更新';
-    freshnessHtml = `<div style="font-size:11px;color:var(--text-secondary);margin-bottom:4px;padding:2px 6px;background:var(--bg-secondary);border-radius:4px">${freshnessIcon} ${freshnessText}${updateHint}</div>`;
+    // ★ 如果来源是预加载缓存，显示"后台已计算"标识
+    const bgTag = f.source === '预加载缓存' 
+      ? '<span style="background:rgba(34,197,94,0.2);color:#22c55e;padding:1px 5px;border-radius:3px;font-size:10px;margin-left:6px">⚡后台已计算</span>' 
+      : '';
+    const methodTag = data.available_methods && data.available_methods.length > 0 
+      ? `<span style="color:var(--text-secondary);font-size:10px;margin-left:4px">${data.available_methods.length}种方法</span>` 
+      : '';
+    freshnessHtml = `<div style="font-size:11px;color:var(--text-secondary);margin-bottom:4px;padding:2px 6px;background:var(--bg-secondary);border-radius:4px">${freshnessIcon} ${freshnessText}${updateHint}${bgTag}${methodTag}</div>`;
   }
 
   let html = freshnessHtml;

@@ -50,6 +50,11 @@ AUTO_TRAIN_THRESHOLD = 50   # 新增数据点超过此数触发重训练
 PREDICTION_HOURS = [24, 48, 72, 120, 168, 240]  # 缓存所有时长
 CACHE_STALE_MINUTES = 30    # 缓存超过30分钟视为过时
 
+# ★ 后台计算使用重型方法（因为后台计算不怕等待）
+# 'all' = 全部方法(含Pangu等重型模型)，'all_fast' = 快速方法(不含Pangu)
+BACKGROUND_METHOD = 'all'   # 后台默认使用所有方法（包括Pangu-Weather）
+BACKGROUND_STALE_MINUTES = 120  # 后台重型计算结果缓存2小时视为过时（更长的新鲜期）
+
 for d in [ISC_DIR, PREDICTION_CACHE_DIR, HASH_DIR]:
     os.makedirs(d, exist_ok=True)
 
@@ -62,9 +67,11 @@ _scheduler_state = {
     'last_prediction': None,
     'last_training': None,
     'last_ecmwf_bufr': None,
+    'last_method': '',
     'active_typhoon_count': 0,
     'cached_predictions_count': 0,
     'on_demand_queue_size': 0,
+    'startup_init_done': False,
     'errors': [],
 }
 
@@ -195,15 +202,31 @@ def fetch_historical_data():
 def fetch_ecmwf_bufr_data():
     """定期获取ECMWF BUFR官方台风轨迹数据"""
     try:
-        from ecmwf_bufr_fetcher import fetch_active_tc_tracks
-        result = fetch_active_tc_tracks()
-        if result and result.get('tracks'):
-            track_count = len(result['tracks'])
-            print(f"[Scheduler] ECMWF BUFR: 获取到{track_count}条官方台风轨迹")
+        from ecmwf_bufr_fetcher import get_ecmwf_active_storms, fetch_ecmwf_tracks_for_typhoon
+        # 获取ECMWF追踪的所有活跃热带气旋
+        active_storms = get_ecmwf_active_storms()
+        if active_storms and active_storms.get('storms'):
+            storm_count = len(active_storms['storms'])
+            print(f"[Scheduler] ECMWF BUFR: 发现{storm_count}个活跃热带气旋")
+
+            # 为每个风暴获取详细轨迹数据并缓存
+            for storm in active_storms['storms']:
+                storm_id = storm.get('id', '')
+                name = storm.get('name', '')
+                try:
+                    tracks = fetch_ecmwf_tracks_for_typhoon(storm_id)
+                    if tracks:
+                        print(f"[Scheduler] ECMWF BUFR: 获取{name or storm_id}轨迹成功")
+                except Exception as e:
+                    print(f"[Scheduler] ECMWF BUFR: 获取{name or storm_id}轨迹失败: {e}")
         else:
-            print("[Scheduler] ECMWF BUFR: 无活跃台风轨迹数据")
+            print("[Scheduler] ECMWF BUFR: 无活跃热带气旋数据")
         _scheduler_state['last_ecmwf_bufr'] = datetime.now().isoformat()
-        return result
+        return active_storms
+    except ImportError:
+        print("[Scheduler] ECMWF BUFR: ecmwf_bufr_fetcher模块未安装，跳过")
+        _scheduler_state['errors'].append("BUFR: 模块未安装")
+        return None
     except Exception as e:
         print(f"[Scheduler] ECMWF BUFR获取异常: {e}")
         _scheduler_state['errors'].append(f"BUFR: {str(e)[:80]}")
@@ -321,8 +344,11 @@ def compute_predictions_for_typhoon(tfid, hours_list=None, method='all'):
     return cached_count
 
 
-def compute_active_predictions():
-    """为所有活跃台风计算预测并缓存结果"""
+def compute_active_predictions(method=None):
+    """为所有活跃台风计算预测并缓存结果（后台自动执行，不等用户选择）"""
+    if method is None:
+        method = BACKGROUND_METHOD  # ★ 后台使用重型方法（含Pangu）
+
     now = datetime.now()
     ym = now.strftime('%Y%m')
     local_file = os.path.join(ISC_DIR, f'{ym}.json')
@@ -350,6 +376,20 @@ def compute_active_predictions():
         except:
             pass
 
+    # ★ 也检查前后2个月（更全面的活跃台风检测）
+    for offset in [-2, 2]:
+        other_ym = (now + timedelta(days=offset * 30)).strftime('%Y%m')
+        other_file = os.path.join(ISC_DIR, f'{other_ym}.json')
+        if os.path.exists(other_file):
+            try:
+                with open(other_file, 'r') as f:
+                    other_data = json.load(f)
+                for t in other_data:
+                    if t.get('is_current') == 1 and t['tfbh'] not in [a['tfbh'] for a in active_typhoons]:
+                        active_typhoons.append(t)
+            except:
+                pass
+
     _scheduler_state['active_typhoon_count'] = len(active_typhoons)
 
     if not active_typhoons:
@@ -357,21 +397,25 @@ def compute_active_predictions():
         _scheduler_state['last_prediction'] = now.isoformat()
         return
 
-    print(f"[Scheduler] 发现 {len(active_typhoons)} 个活跃台风，开始全方法预测")
+    active_ids = [t.get('tfbh', '') for t in active_typhoons if t.get('tfbh')]
+    print(f"[Scheduler] 发现 {len(active_typhoons)} 个活跃台风: {active_ids}")
+    print(f"[Scheduler] 使用方法: {method} (后台重型计算)")
 
     total_cached = 0
     for t in active_typhoons:
         tfid = t.get('tfbh', '')
         if not tfid:
             continue
-        cached = compute_predictions_for_typhoon(tfid)
+        # ★ 后台计算所有时长 + 重型方法
+        cached = compute_predictions_for_typhoon(tfid, method=method)
         total_cached += cached
 
     _scheduler_state['cached_predictions_count'] = len(
         [f for f in os.listdir(PREDICTION_CACHE_DIR) if f.endswith('.json')]
     )
     _scheduler_state['last_prediction'] = now.isoformat()
-    print(f"[Scheduler] 预测计算完成: {len(active_typhoons)}台风, {total_cached}缓存文件")
+    _scheduler_state['last_method'] = method
+    print(f"[Scheduler] 预测计算完成: {len(active_typhoons)}台风, {total_cached}缓存文件, 方法={method}")
 
 
 def compute_on_demand(tfid, hours=168, method='all'):
@@ -560,6 +604,57 @@ def run_scheduler_loop():
 # Flask嵌入版本
 # ============================================================
 
+def startup_init():
+    """
+    ★ 启动时立即初始化：获取数据 + 计算所有活跃台风预测
+    在后台线程中运行，不阻塞Flask启动
+    """
+    print("=" * 60)
+    print("[Scheduler] ★ 启动初始化开始（后台线程）")
+    print("  自动计算所有活跃台风 → 缓存 → 前端秒级读取")
+    print("=" * 60)
+
+    # Step 1: 获取当前数据
+    print("[Scheduler] 初始化 Step 1: 获取当前数据...")
+    try:
+        fetch_current_data()
+    except Exception as e:
+        print(f"[Scheduler] 数据获取异常: {e}")
+
+    # Step 2: 获取ECMWF BUFR数据（如可用）
+    print("[Scheduler] 初始化 Step 2: 获取ECMWF BUFR官方轨迹...")
+    try:
+        fetch_ecmwf_bufr_data()
+    except Exception as e:
+        print(f"[Scheduler] BUFR获取异常: {e}")
+
+    # Step 3: LSTM模型检查（如未训练则首次训练）
+    print("[Scheduler] 初始化 Step 3: LSTM模型检查...")
+    try:
+        from lstm_predictor import is_lstm_ready, LSTMTrainer
+        if not is_lstm_ready():
+            print("[Scheduler] LSTM模型不存在, 首次训练...")
+            trainer = LSTMTrainer()
+            X, Y, count = trainer.load_training_data()
+            if X is not None:
+                trainer.train(X, Y, epochs=80)
+                print("[Scheduler] LSTM首次训练完成")
+    except Exception as e:
+        print(f"[Scheduler] LSTM训练异常: {e}")
+
+    # Step 4: ★ 核心步骤 — 计算所有活跃台风预测（使用重型方法）
+    print("[Scheduler] 初始化 Step 4: 全活跃台风预测计算（重型方法）...")
+    try:
+        compute_active_predictions(method=BACKGROUND_METHOD)
+    except Exception as e:
+        print(f"[Scheduler] 活跃台风预测异常: {e}")
+
+    print("=" * 60)
+    print("[Scheduler] ★ 启动初始化完成！前端可立即读取缓存")
+    print("=" * 60)
+    _scheduler_state['startup_init_done'] = True
+
+
 def setup_flask_scheduler(app):
     """在Flask应用中嵌入APScheduler后台任务"""
     from apscheduler.schedulers.background import BackgroundScheduler
@@ -575,13 +670,13 @@ def setup_flask_scheduler(app):
         name='定时数据获取',
     )
 
-    # 每30分钟刷新预测
+    # 每30分钟刷新预测（使用重型方法）
     scheduler.add_job(
         func=_scheduled_prediction_refresh,
         trigger='interval',
         seconds=PREDICTION_INTERVAL,
         id='prediction_refresh',
-        name='定时预测刷新',
+        name='定时预测刷新(重型方法)',
     )
 
     # 每6小时获取ECMWF BUFR
@@ -605,6 +700,12 @@ def setup_flask_scheduler(app):
 
     scheduler.start()
     print("[Scheduler] APScheduler v2已启动 (数据1h/预测30min/BUFR6h/训练24h)")
+
+    # ★ 启动后立即在后台线程初始化（不等第一个定时周期）
+    init_thread = threading.Thread(target=startup_init, daemon=True)
+    init_thread.start()
+    print("[Scheduler] 启动初始化已在后台线程启动，约1-5分钟后缓存可用")
+
     return scheduler
 
 
@@ -613,8 +714,8 @@ def _scheduled_data_fetch():
     try:
         changes, new_points = fetch_current_data()
         if changes > 0:
-            print(f"[APScheduler] 数据变化: {changes}月, {new_points}点 → 触发全方法预测")
-            compute_active_predictions()
+            print(f"[APScheduler] 数据变化: {changes}月, {new_points}点 → 触发重型方法预测")
+            compute_active_predictions(method=BACKGROUND_METHOD)
             auto_train_if_needed(new_points)
     except Exception as e:
         print(f"[APScheduler] 数据获取异常: {e}")
@@ -622,9 +723,9 @@ def _scheduled_data_fetch():
 
 
 def _scheduled_prediction_refresh():
-    """APScheduler: 定时预测刷新"""
+    """APScheduler: 定时预测刷新（重型方法）"""
     try:
-        compute_active_predictions()
+        compute_active_predictions(method=BACKGROUND_METHOD)
     except Exception as e:
         print(f"[APScheduler] 预测刷新异常: {e}")
         _scheduler_state['errors'].append(f"prediction: {str(e)[:80]}")
@@ -736,10 +837,14 @@ def get_scheduler_status():
     except:
         pass
 
+    # ★ 活跃台风缓存覆盖情况
+    active_coverage = get_active_cache_coverage()
+
     return {
         'scheduler_running': True,
         'version': 'v2',
         'architecture': '后台持续计算 → 缓存 → 前端秒级读取',
+        'background_method': BACKGROUND_METHOD,
         'data_files_count': len(data_files),
         'hash_files_count': len(hash_files),
         'cached_predictions_count': len(pred_files),
@@ -749,19 +854,84 @@ def get_scheduler_status():
         'pangu_model_ready': pangu_ready,
         'ecmwf_bufr_available': bufr_available,
         'active_typhoon_count': _scheduler_state.get('active_typhoon_count', 0),
+        'active_cache_coverage': active_coverage,
         'on_demand_queue_size': _scheduler_state.get('on_demand_queue_size', 0),
         'last_data_fetch': _scheduler_state.get('last_data_fetch', ''),
         'last_prediction': _scheduler_state.get('last_prediction', ''),
+        'last_method': _scheduler_state.get('last_method', ''),
         'last_ecmwf_bufr': _scheduler_state.get('last_ecmwf_bufr', ''),
         'last_training': _scheduler_state.get('last_training', ''),
+        'startup_init_done': _scheduler_state.get('startup_init_done', False),
         'recent_errors': _scheduler_state.get('errors', [])[-5:],
         'auto_fetch_interval': f'{FETCH_INTERVAL}秒 (1小时)',
         'auto_prediction_interval': f'{PREDICTION_INTERVAL}秒 (30分钟)',
+        'auto_prediction_method': f'{BACKGROUND_METHOD} (后台重型方法)',
         'auto_bufr_interval': '6小时',
         'auto_training_schedule': '每天3:00AM',
         'prediction_hours': PREDICTION_HOURS,
         'cache_stale_threshold': f'{CACHE_STALE_MINUTES}分钟',
+        'background_stale_threshold': f'{BACKGROUND_STALE_MINUTES}分钟(重型计算)',
     }
+
+
+def get_active_cache_coverage():
+    """★ 查询所有活跃台风的缓存覆盖情况（前端批量预加载用）"""
+    now = datetime.now()
+    ym = now.strftime('%Y%m')
+    local_file = os.path.join(ISC_DIR, f'{ym}.json')
+
+    active_typhoons = []
+
+    # 搜索当前月 + 前后月份的活跃台风
+    for offset in [-2, -1, 0, 1, 2]:
+        month_dt = now + timedelta(days=offset * 30)
+        month_ym = month_dt.strftime('%Y%m')
+        month_file = os.path.join(ISC_DIR, f'{month_ym}.json')
+        if not os.path.exists(month_file):
+            continue
+        try:
+            with open(month_file, 'r') as f:
+                month_data = json.load(f)
+            for t in month_data:
+                if t.get('is_current') == 1 and t.get('tfbh') not in [a['tfbh'] for a in active_typhoons]:
+                    active_typhoons.append(t)
+        except:
+            pass
+
+    # 构建缓存覆盖信息
+    coverage = []
+    for t in active_typhoons:
+        tfid = t.get('tfbh', '')
+        if not tfid:
+            continue
+        cached_hours = []
+        for h in PREDICTION_HOURS:
+            cache_file = os.path.join(PREDICTION_CACHE_DIR, f'{tfid}_{h}h.json')
+            if os.path.exists(cache_file):
+                try:
+                    with open(cache_file, 'r') as f:
+                        data = json.load(f)
+                    computed_at = data.get('computed_at', '')
+                    age_min = (datetime.now() - datetime.fromisoformat(computed_at)).total_seconds() / 60
+                    cached_hours.append({
+                        'hours': h,
+                        'fresh': age_min < BACKGROUND_STALE_MINUTES,
+                        'age_minutes': round(age_min),
+                        'computed_at': computed_at,
+                        'methods': list(data.get('predictions', {}).keys()),
+                    })
+                except:
+                    cached_hours.append({'hours': h, 'fresh': False, 'age_minutes': 999})
+        coverage.append({
+            'tfid': tfid,
+            'name_cn': t.get('name_cn', ''),
+            'name_en': t.get('name_en', ''),
+            'cached_hours': cached_hours,
+            'total_cached': len(cached_hours),
+            'total_expected': len(PREDICTION_HOURS),
+        })
+
+    return coverage
 
 
 # ============================================================

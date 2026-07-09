@@ -2516,6 +2516,96 @@ def scheduler_status():
     return jsonify(get_scheduler_status())
 
 
+@app.route('/api/predictions/active-cache')
+def get_active_cached_predictions():
+    """
+    ★ 批量获取所有活跃台风的缓存预测结果
+    前端启动时调用此接口，一次性获取所有已缓存的数据
+    不需要用户选择台风，后台已经计算好了
+    """
+    from scheduler import get_active_cache_coverage, get_cached_prediction, PREDICTION_HOURS
+    hours = request.args.get('hours', 168, type=int)
+
+    coverage = get_active_cache_coverage()
+    results = []
+
+    for item in coverage:
+        tfid = item['tfid']
+        # 读取缓存（前端最常用的168h）
+        cached = get_cached_prediction(tfid, hours)
+        if cached and cached.get('predictions'):
+            results.append({
+                'tfid': tfid,
+                'name_cn': item.get('name_cn', ''),
+                'name_en': item.get('name_en', ''),
+                'hours': hours,
+                'predictions': cached.get('predictions', {}),
+                'cache_age_minutes': cached.get('cache_age_minutes', 0),
+                'cache_fresh': cached.get('cache_fresh', False),
+                'computed_at': cached.get('computed_at', ''),
+                'available_methods': list(cached.get('predictions', {}).keys()),
+            })
+
+    return jsonify({
+        'success': True,
+        'active_count': len(coverage),
+        'cached_count': len(results),
+        'predictions': results,
+        'message': f'活跃台风{len(coverage)}个, 已缓存{len(results)}个预测',
+    })
+
+
+@app.route('/api/predictions/active-cache-all')
+def get_active_cached_predictions_all_hours():
+    """
+    ★ 批量获取所有活跃台风的所有时长缓存预测
+    前端可以一次性获取24h/48h/72h/120h/168h/240h的所有缓存
+    """
+    from scheduler import get_active_cache_coverage, get_cached_prediction, PREDICTION_HOURS
+
+    coverage = get_active_cache_coverage()
+    results = {}
+
+    for item in coverage:
+        tfid = item['tfid']
+        results[tfid] = {
+            'name_cn': item.get('name_cn', ''),
+            'name_en': item.get('name_en', ''),
+            'hours_data': {},
+        }
+        for h in PREDICTION_HOURS:
+            cached = get_cached_prediction(tfid, h)
+            if cached and cached.get('predictions'):
+                results[tfid]['hours_data'][h] = {
+                    'predictions': cached.get('predictions', {}),
+                    'cache_age_minutes': cached.get('cache_age_minutes', 0),
+                    'cache_fresh': cached.get('cache_fresh', False),
+                    'computed_at': cached.get('computed_at', ''),
+                    'available_methods': list(cached.get('predictions', {}).keys()),
+                }
+
+    return jsonify({
+        'success': True,
+        'active_count': len(coverage),
+        'cached_typhoons': list(results.keys()),
+        'data': results,
+    })
+
+
+@app.route('/api/scheduler/init-status')
+def scheduler_init_status():
+    """查询启动初始化是否完成（前端轮询此接口判断缓存是否可用）"""
+    from scheduler import _scheduler_state
+    return jsonify({
+        'init_done': _scheduler_state.get('startup_init_done', False),
+        'active_count': _scheduler_state.get('active_typhoon_count', 0),
+        'cached_count': _scheduler_state.get('cached_predictions_count', 0),
+        'on_demand_queue': _scheduler_state.get('on_demand_queue_size', 0),
+        'last_prediction': _scheduler_state.get('last_prediction', ''),
+        'last_method': _scheduler_state.get('last_method', ''),
+    })
+
+
 @app.route('/api/prediction-methods')
 def get_prediction_methods():
     """获取所有可用的预测方法及其说明"""
