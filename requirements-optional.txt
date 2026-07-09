@@ -5,3 +5,5 @@ pdbufr>=0.10
 eccodes>=1.7
 # Pangu-Weather ONNX 推理 (P2)
 onnxruntime>=1.17
+# HuggingFace Hub - 从国内镜像下载Pangu模型
+huggingface_hub>=0.20

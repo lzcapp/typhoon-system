@@ -3,9 +3,10 @@ FROM python:3.12-slim
 LABEL maintainer="typhoon-system"
 LABEL description="台风路径预测系统 - AI预测+地图可视化"
 
-# 安装系统依赖（含eccodes C库，用于ECMWF BUFR解析）
+# 安装系统依赖（含eccodes C库 + wget用于模型下载）
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    wget \
     libeccodes-dev \
     && rm -rf /var/lib/apt/lists/*
 
@@ -47,6 +48,11 @@ RUN pip install --no-cache-dir "onnxruntime>=1.17" || \
     echo "⚠️ onnxruntime安装失败，Pangu-Weather推理不可用" \
     && rm -rf /root/.cache/pip
 
+# P2: HuggingFace Hub - 用于从国内镜像下载Pangu模型
+RUN pip install --no-cache-dir "huggingface_hub>=0.20" || \
+    echo "⚠️ huggingface_hub安装失败，将使用requests/wget下载" \
+    && rm -rf /root/.cache/pip
+
 # 复制应用代码和启动脚本
 COPY backend/ /app/backend/
 COPY static/ /app/static/
@@ -58,12 +64,13 @@ RUN mkdir -p /app/data/isc /app/data/nii /app/data/predictions /app/data/hashes 
 
 # 环境变量
 ENV PYTHONUNBUFFERED=1
+ENV HF_ENDPOINT=https://hf-mirror.com
 
 # 暴露端口
 EXPOSE 8088
 
-# 健康检查(延长start_period，首次启动下载模型需要时间)
-HEALTHCHECK --interval=60s --timeout=10s --start-period=120s \
+# 健康检查(模型在后台下载, 不阻塞应用启动, start_period仅需覆盖Flask启动)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:8088/api/data/status || exit 1
 
 # 使用entrypoint脚本启动(自动检测并下载模型)
