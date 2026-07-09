@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
@@ -2304,8 +2305,70 @@ def data_status():
         'total_cached_files': len([f for f in os.listdir(ISC_DIR) if f.endswith('.json')]),
         'lstm_ready': is_lstm_ready(),
         'pangu_ready': is_pangu_ready(),
+        'pangu_detail': _get_pangu_detail(),
         'ecmwf_bufr_available': is_bufr_available(),
     })
+
+
+def _get_pangu_detail():
+    """获取Pangu模型的详细状态信息"""
+    from pangu_predictor import PANGU_24H_MODEL, PANGU_6H_MODEL
+    detail = {'ready': False, 'models': {}}
+    for name, path in [('24h', PANGU_24H_MODEL), ('6h', PANGU_6H_MODEL)]:
+        exists = os.path.exists(path)
+        size_mb = round(os.path.getsize(path) / (1024 * 1024), 1) if exists else 0
+        detail['models'][name] = {
+            'exists': exists,
+            'size_mb': size_mb,
+            'ready': exists and size_mb > 100,
+            'path': path,
+        }
+    detail['ready'] = all(m['ready'] for m in detail['models'].values())
+    return detail
+
+
+# ---- Pangu-Weather 模型下载 API ----
+
+_pangu_download_thread = None
+_pangu_download_lock = threading.Lock()
+
+@app.route('/api/pangu/download', methods=['POST'])
+def trigger_pangu_download():
+    """手动触发Pangu-Weather模型下载（后台线程）"""
+    global _pangu_download_thread
+
+    # 检查是否已有下载在进行
+    with _pangu_download_lock:
+        if _pangu_download_thread and _pangu_download_thread.is_alive():
+            return jsonify({'status': 'already_downloading', 'message': '下载正在进行中...'})
+
+        from pangu_downloader import download_pangu_models, _write_status
+        _write_status('downloading', '用户手动触发下载...', 0)
+
+        def _bg_download():
+            try:
+                download_pangu_models()
+            except Exception as e:
+                from pangu_downloader import _write_status
+                _write_status('failed', f'下载异常: {str(e)[:200]}', 0)
+
+        _pangu_download_thread = threading.Thread(target=_bg_download, daemon=True)
+        _pangu_download_thread.start()
+
+    return jsonify({
+        'status': 'started',
+        'message': 'Pangu模型下载已启动，请稍后查看状态...',
+        'estimated_time': '约5-15分钟（取决于网速）'
+    })
+
+
+@app.route('/api/pangu/download-status')
+def pangu_download_status():
+    """查询Pangu模型下载状态"""
+    from pangu_downloader import get_download_status
+    status = get_download_status()
+    status['pangu_ready'] = is_pangu_ready()
+    return jsonify(status)
 
 
 @app.route('/api/data/cache', methods=['POST'])

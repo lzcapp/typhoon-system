@@ -1630,6 +1630,8 @@ async function checkECMWFBUFRStatus() {
   }
 }
 
+let panguDownloadPolling = null;
+
 async function checkPanguStatus() {
   try {
     const resp = await fetch(`${API_BASE}/api/data/status`);
@@ -1637,15 +1639,86 @@ async function checkPanguStatus() {
     const el = document.getElementById('panguStatus');
     if (el) {
       if (status.pangu_ready) {
-        el.textContent = '✅ 盘古大模型权重已下载';
+        el.innerHTML = '✅ 盘古大模型权重已下载';
         el.style.color = '#8b5cf6';
+        if (panguDownloadPolling) { clearInterval(panguDownloadPolling); panguDownloadPolling = null; }
       } else {
-        el.textContent = '⚠️ 盘古大模型权重未下载(需~2.2GB ONNX文件)';
-        el.style.color = '#f59e0b';
+        let detail = status.pangu_detail || {};
+        let models = detail.models || {};
+        let modelInfo = '';
+        for (const [k, v] of Object.entries(models)) {
+          const icon = v.ready ? '✅' : (v.exists ? '⚠️' : '❌');
+          const sizeStr = v.exists ? `${v.size_mb}MB` : '未下载';
+          modelInfo += `${icon} ${k}: ${sizeStr}  `;
+        }
+        el.innerHTML = `<span style="color:#f59e0b">⚠️ 盘古大模型未就绪</span>` +
+          `<div style="font-size:10px;margin-top:2px;color:var(--text-secondary)">${modelInfo}</div>` +
+          `<button onclick="downloadPanguModels()" style="margin-top:4px;padding:3px 10px;font-size:11px;background:#8b5cf6;color:white;border:none;border-radius:4px;cursor:pointer">下载模型 (~2.2GB)</button>`;
       }
     }
   } catch(e) {
     console.log('Pangu status check failed', e);
+  }
+}
+
+async function downloadPanguModels() {
+  try {
+    const resp = await fetch(`${API_BASE}/api/pangu/download`, { method: 'POST' });
+    const result = await resp.json();
+    if (result.status === 'already_downloading') {
+      alert('下载正在进行中，请等待...');
+    } else {
+      alert(result.message || '下载已启动');
+    }
+    if (!panguDownloadPolling) {
+      panguDownloadPolling = setInterval(checkPanguDownloadStatus, 5000);
+      checkPanguDownloadStatus();
+    }
+  } catch(e) {
+    alert('触发下载失败: ' + e.message);
+  }
+}
+
+async function checkPanguDownloadStatus() {
+  try {
+    const resp = await fetch(`${API_BASE}/api/pangu/download-status`);
+    const status = await resp.json();
+    const el = document.getElementById('panguStatus');
+    if (!el) return;
+
+    if (status.pangu_ready) {
+      el.innerHTML = '✅ 盘古大模型权重已下载';
+      el.style.color = '#8b5cf6';
+      if (panguDownloadPolling) { clearInterval(panguDownloadPolling); panguDownloadPolling = null; }
+      return;
+    }
+
+    if (status.status === 'downloading') {
+      const pct = status.progress || 0;
+      let modelInfo = '';
+      const models = status.models || {};
+      for (const [k, v] of Object.entries(models)) {
+        const icon = v.ready ? '✅' : (v.exists ? '📥' : '⬜');
+        const sizeStr = v.exists ? `${v.size_mb}MB` : '等待中';
+        modelInfo += `${icon} ${k.replace('.onnx','')}: ${sizeStr}  `;
+      }
+      el.innerHTML = `<span style="color:#3b82f6">📥 下载中... ${pct}%</span>` +
+        `<div style="font-size:10px;margin-top:2px;color:var(--text-secondary)">${modelInfo}</div>` +
+        `<div style="font-size:10px;margin-top:2px;color:var(--text-secondary)">${status.detail || ''}</div>` +
+        `<div style="margin-top:4px;width:100%;height:4px;background:var(--bg-secondary);border-radius:2px;overflow:hidden">` +
+        `<div style="width:${pct}%;height:100%;background:#3b82f6;transition:width 0.5s"></div></div>`;
+    } else if (status.status === 'success') {
+      el.innerHTML = '✅ 盘古大模型权重已下载';
+      el.style.color = '#8b5cf6';
+      if (panguDownloadPolling) { clearInterval(panguDownloadPolling); panguDownloadPolling = null; }
+    } else if (status.status === 'failed') {
+      el.innerHTML = `<span style="color:#ef4444">❌ 下载失败: ${status.detail || '未知错误'}</span>` +
+        `<div style="font-size:10px;margin-top:2px;color:var(--text-secondary)">可稍后重试或手动下载</div>` +
+        `<button onclick="downloadPanguModels()" style="margin-top:4px;padding:3px 10px;font-size:11px;background:#8b5cf6;color:white;border:none;border-radius:4px;cursor:pointer">重新下载</button>`;
+      if (panguDownloadPolling) { clearInterval(panguDownloadPolling); panguDownloadPolling = null; }
+    }
+  } catch(e) {
+    console.log('Pangu download status check failed', e);
   }
 }
 

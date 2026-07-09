@@ -6,13 +6,14 @@
 #   AUTO_DOWNLOAD_PANGU=1 (默认) 自动下载缺失的模型
 #   AUTO_DOWNLOAD_PANGU=0          跳过下载，仅检查状态
 
-set -e
+# 注意: 不使用 set -e，因为 _check_file 在文件不存在时返回1是正常行为
+set -u
 
 MODEL_DIR="/app/backend/models/pangu"
 PANGU_24H="${MODEL_DIR}/pangu_weather_24.onnx"
 PANGU_6H="${MODEL_DIR}/pangu_weather_6.onnx"
 
-# Google Drive 文件ID (Pangu-Weather官方仓库)
+# Google Drive 文件ID (Pangu-Weather官方仓库: https://github.com/198808xc/Pangu-Weather)
 GDRIVE_24H_ID="1lweQlxcn9fG0zKNW8ne1Khr9ehRTI6HP"
 GDRIVE_6H_ID="1a4XTktkZa5GCtjQxDJb_fNaqTAUiEJu4"
 
@@ -61,7 +62,6 @@ _check_file() {
     local name="$2"
     if [ -f "$filepath" ]; then
         local fsize
-        # macOS 和 Linux stat 语法不同
         fsize=$(stat -c%s "$filepath" 2>/dev/null || stat -f%z "$filepath" 2>/dev/null || echo "0")
         if [ "$fsize" -gt "$MIN_SIZE" ]; then
             local hsize=$(du -h "$filepath" | cut -f1)
@@ -79,8 +79,9 @@ _check_file() {
     fi
 }
 
-_check_file "$PANGU_24H" "24h预报模型"
-_check_file "$PANGU_6H" "6h预报模型"
+# ★ 修复: 加 || true 防止 _check_file 返回1时脚本退出
+_check_file "$PANGU_24H" "24h预报模型" || true
+_check_file "$PANGU_6H" "6h预报模型" || true
 
 # ---- 自动下载 ----
 if [ "$NEED_DOWNLOAD" = true ] && [ "$AUTO_DOWNLOAD" = "1" ]; then
@@ -95,57 +96,10 @@ if [ "$NEED_DOWNLOAD" = true ] && [ "$AUTO_DOWNLOAD" = "1" ]; then
 
     mkdir -p "$MODEL_DIR"
 
-    # 安装gdown
-    echo "安装下载工具..."
-    pip install --no-cache-dir gdown 2>/dev/null || echo "  ⚠️ gdown安装失败，尝试继续"
-
-    _download_model() {
-        local file_id="$1"
-        local target="$2"
-        local name="$3"
-
-        # 已存在且完整则跳过
-        if [ -f "$target" ]; then
-            local fsize
-            fsize=$(stat -c%s "$target" 2>/dev/null || stat -f%z "$target" 2>/dev/null || echo "0")
-            if [ "$fsize" -gt "$MIN_SIZE" ]; then
-                echo "  ✅ ${name} 已存在, 跳过"
-                return 0
-            fi
-        fi
-
-        echo "  下载 ${name} (~1.1GB)..."
-        python3 << PYEOF
-import sys
-try:
-    import gdown
-except ImportError:
-    print("  ⚠️ gdown不可用，跳过下载")
-    sys.exit(0)
-
-import os
-url = 'https://drive.google.com/uc?id=${file_id}'
-target = '${target}'
-min_size = ${MIN_SIZE}
-
-try:
-    gdown.download(url, target, quiet=False)
-    if os.path.exists(target) and os.path.getsize(target) > min_size:
-        size_gb = os.path.getsize(target) / (1024**3)
-        print(f'  ✅ ${name}下载完成: {size_gb:.2f} GB')
-    else:
-        print(f'  ❌ ${name}下载失败或文件不完整')
-        if os.path.exists(target):
-            os.remove(target)
-except Exception as e:
-    print(f'  ❌ ${name}下载失败: {e}')
-    if os.path.exists(target):
-        os.remove(target)
-PYEOF
-    }
-
-    _download_model "$GDRIVE_24H_ID" "$PANGU_24H" "24h模型"
-    _download_model "$GDRIVE_6H_ID" "$PANGU_6H" "6h模型"
+    # 使用 Python 下载脚本（支持重试 + fallback）
+    echo "启动下载脚本..."
+    python3 /app/backend/pangu_downloader.py --auto || \
+        echo "  ⚠️ 自动下载未完全成功，可在前端手动重试"
 
     # 下载结果摘要
     echo ""
@@ -156,7 +110,8 @@ PYEOF
 elif [ "$NEED_DOWNLOAD" = true ] && [ "$AUTO_DOWNLOAD" != "1" ]; then
     echo ""
     echo "⚠️ AUTO_DOWNLOAD_PANGU=0, 跳过自动下载"
-    echo "手动下载: python backend/models/pangu/download_models.py"
+    echo "手动下载: python backend/pangu_downloader.py"
+    echo "或通过前端界面点击下载按钮"
 fi
 
 # ---- 启动应用 ----
