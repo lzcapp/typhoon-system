@@ -50,7 +50,7 @@ RUN pip install --no-cache-dir "onnxruntime>=1.17" || \
 
 # P2: HuggingFace Hub - 用于从国内镜像下载Pangu模型
 RUN pip install --no-cache-dir "huggingface_hub>=0.20" || \
-    echo "⚠️ huggingface_hub安装失败，将使用requests/wget下载" \
+    echo "⚠️ huggingface_hub安装失败，Pangu模型自动下载不可用(可手动下载)" \
     && rm -rf /root/.cache/pip
 
 # 复制应用代码和启动脚本
@@ -69,9 +69,10 @@ ENV HF_ENDPOINT=https://hf-mirror.com
 # 暴露端口
 EXPOSE 8088
 
-# 健康检查(模型在后台下载, 不阻塞应用启动, start_period仅需覆盖Flask启动)
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+# 健康检查(应用立即启动, 不等待模型下载)
+# start_period=60s 给Flask+scheduler初始化足够时间, retries=5 容忍偶尔慢响应
+HEALTHCHECK --interval=30s --timeout=15s --start-period=60s --retries=5 \
     CMD curl -f http://localhost:8088/api/data/status || exit 1
 
-# 使用entrypoint脚本启动(自动检测并下载模型)
+# 使用entrypoint脚本启动(只启动Flask, 不做下载)
 ENTRYPOINT ["/app/entrypoint.sh"]

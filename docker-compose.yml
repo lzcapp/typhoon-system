@@ -10,23 +10,21 @@ services:
     ports:
       - "8088:8088"
     volumes:
-      # 持久化数据（ISC缓存、预测结果、ECMWF BUFR缓存、GRIB2缓存、下载日志）
+      # 持久化数据（ISC缓存、预测结果、ECMWF BUFR缓存、GRIB2缓存）
       - ./data:/app/data
       # Pangu-Weather ONNX模型权重(~2.4GB)
-      # 后台自动从HuggingFace镜像下载，通过volume持久化后无需重复下载
+      # 可通过前端"自动下载"或从百度网盘手动下载放入此目录
       - ./backend/models/pangu:/app/backend/models/pangu
       # ⚠️ 不要挂载 ./static！会覆盖镜像内置的 index.html 导致 404
     environment:
       - TZ=Asia/Shanghai
       - PYTHONUNBUFFERED=1
-      # HuggingFace 国内镜像 (无需翻墙)
+      # HuggingFace 国内镜像 (huggingface_hub库会使用此端点)
       - HF_ENDPOINT=https://hf-mirror.com
-      # Pangu模型后台自动下载(默认开启，设为0关闭)
-      - AUTO_DOWNLOAD_PANGU=1
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8088/api/data/status"]
       interval: 30s
-      timeout: 10s
-      retries: 3
-      # 应用立即启动，模型在后台下载，不需要长等待
-      start_period: 30s
+      timeout: 15s
+      retries: 5
+      # 应用立即启动(不做下载), 60s足够Flask+scheduler初始化
+      start_period: 60s

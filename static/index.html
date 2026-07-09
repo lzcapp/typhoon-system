@@ -1653,11 +1653,35 @@ async function checkPanguStatus() {
         }
         el.innerHTML = `<span style="color:#f59e0b">⚠️ 盘古大模型未就绪</span>` +
           `<div style="font-size:10px;margin-top:2px;color:var(--text-secondary)">${modelInfo}</div>` +
-          `<button onclick="downloadPanguModels()" style="margin-top:4px;padding:3px 10px;font-size:11px;background:#8b5cf6;color:white;border:none;border-radius:4px;cursor:pointer">下载模型 (~2.2GB)</button>`;
+          `<div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap">` +
+          `<button onclick="downloadPanguModels()" style="padding:3px 10px;font-size:11px;background:#8b5cf6;color:white;border:none;border-radius:4px;cursor:pointer">自动下载</button>` +
+          `<button onclick="showManualDownload()" style="padding:3px 10px;font-size:11px;background:#10b981;color:white;border:none;border-radius:4px;cursor:pointer">手动下载说明</button>` +
+          `</div>`;
       }
     }
   } catch(e) {
     console.log('Pangu status check failed', e);
+  }
+}
+
+async function showManualDownload() {
+  try {
+    const resp = await fetch(`${API_BASE}/api/pangu/manual-download-info`);
+    const info = await resp.json();
+    let msg = '【Pangu-Weather 模型手动下载】\n\n';
+    msg += '从百度网盘下载以下文件:\n\n';
+    for (const [fname, minfo] of Object.entries(info.models || {})) {
+      const status = minfo.ready ? '✅已就绪' : (minfo.exists ? '⚠️不完整' : '❌未下载');
+      msg += `${fname} (${minfo.size}) ${status}\n`;
+      msg += `  百度网盘: ${minfo.baidu_url}\n`;
+      msg += `  提取码: ${minfo.baidu_code}\n\n`;
+    }
+    msg += `下载后放置到目录:\n${info.target_dir}\n\n`;
+    msg += `(即Docker映射的 ./backend/models/pangu/ 目录)\n`;
+    msg += `放好后重启容器或刷新页面即可生效`;
+    alert(msg);
+  } catch(e) {
+    alert('获取下载信息失败: ' + e.message);
   }
 }
 
@@ -1712,9 +1736,12 @@ async function checkPanguDownloadStatus() {
       el.style.color = '#8b5cf6';
       if (panguDownloadPolling) { clearInterval(panguDownloadPolling); panguDownloadPolling = null; }
     } else if (status.status === 'failed') {
-      el.innerHTML = `<span style="color:#ef4444">❌ 下载失败: ${status.detail || '未知错误'}</span>` +
-        `<div style="font-size:10px;margin-top:2px;color:var(--text-secondary)">可稍后重试或手动下载</div>` +
-        `<button onclick="downloadPanguModels()" style="margin-top:4px;padding:3px 10px;font-size:11px;background:#8b5cf6;color:white;border:none;border-radius:4px;cursor:pointer">重新下载</button>`;
+      el.innerHTML = `<span style="color:#ef4444">❌ 自动下载失败</span>` +
+        `<div style="font-size:10px;margin-top:2px;color:var(--text-secondary)">${status.detail || '可能网络不通'}</div>` +
+        `<div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap">` +
+        `<button onclick="downloadPanguModels()" style="padding:3px 10px;font-size:11px;background:#8b5cf6;color:white;border:none;border-radius:4px;cursor:pointer">重试自动下载</button>` +
+        `<button onclick="showManualDownload()" style="padding:3px 10px;font-size:11px;background:#10b981;color:white;border:none;border-radius:4px;cursor:pointer">手动下载说明</button>` +
+        `</div>`;
       if (panguDownloadPolling) { clearInterval(panguDownloadPolling); panguDownloadPolling = null; }
     }
   } catch(e) {

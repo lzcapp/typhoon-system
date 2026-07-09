@@ -2371,6 +2371,13 @@ def pangu_download_status():
     return jsonify(status)
 
 
+@app.route('/api/pangu/manual-download-info')
+def pangu_manual_download_info():
+    """返回Pangu模型手动下载说明（百度网盘地址等）"""
+    from pangu_downloader import get_manual_download_info
+    return jsonify(get_manual_download_info())
+
+
 @app.route('/api/data/cache', methods=['POST'])
 def cache_data():
     """批量缓存指定年份范围的ISC数据到本地"""
