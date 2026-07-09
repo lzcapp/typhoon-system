@@ -2471,52 +2471,49 @@ def lstm_train():
 
 @app.route('/api/predictions/cached/<tfid>/<int:hours>')
 def get_cached_prediction(tfid, hours):
-    """从缓存中读取自动计算的预测结果（前端快速查询）"""
-    from scheduler import get_cached_prediction
-    result = get_cached_prediction(tfid, hours)
+    """
+    从缓存中读取自动计算的预测结果（前端秒级查询）
+    
+    优先架构: 前端先查缓存 → 缓存新鲜则秒级返回 → 
+    缓存过时/缺失则触发按需计算 + 降级实时计算
+    """
+    from scheduler import get_cached_prediction, compute_on_demand
+    method = request.args.get('method', None)
+    result = get_cached_prediction(tfid, hours, method=method)
     if result:
         return jsonify(result)
-    return jsonify({'cached': False, 'message': '无缓存预测，请手动触发预测'})
+    
+    # 无缓存 → 触发后台按需计算 + 前端降级到实时计算
+    compute_on_demand(tfid, hours)
+    return jsonify({
+        'cached': False,
+        'message': '无缓存预测，已触发后台计算',
+        'fallback_hint': '前端应回退到实时预测API',
+    })
+
+
+@app.route('/api/predictions/trigger/<tfid>/<int:hours>')
+def trigger_on_demand_prediction(tfid, hours):
+    """
+    触发后台按需预测计算（立即返回，计算在后台线程中完成）
+    前端可在展示实时计算结果后调用此API，为下次访问缓存结果
+    """
+    from scheduler import compute_on_demand
+    method = request.args.get('method', 'all')
+    compute_on_demand(tfid, hours, method=method)
+    return jsonify({
+        'triggered': True,
+        'tfid': tfid,
+        'hours': hours,
+        'message': '后台计算已启动，约30秒后可查询缓存',
+    })
 
 
 @app.route('/api/scheduler/status')
 def scheduler_status():
-    """查询调度引擎状态"""
-    from scheduler import PREDICTION_CACHE_DIR, HASH_DIR
-    from lstm_predictor import is_lstm_ready
-
-    # 统计缓存预测文件
-    pred_files = [f for f in os.listdir(PREDICTION_CACHE_DIR) if f.endswith('.json')] if os.path.exists(PREDICTION_CACHE_DIR) else []
-
-    # 统计数据文件
-    data_files = [f for f in os.listdir(ISC_DIR) if f.endswith('.json')] if os.path.exists(ISC_DIR) else []
-
-    # 统计哈希文件(有哈希 = 已检测过变化)
-    hash_files = [f for f in os.listdir(HASH_DIR) if f.endswith('.hash')] if os.path.exists(HASH_DIR) else []
-
-    # 最近一次预测时间
-    latest_pred_time = ''
-    if pred_files:
-        latest_file = os.path.join(PREDICTION_CACHE_DIR, max(pred_files))
-        try:
-            with open(latest_file, 'r') as f:
-                d = json.load(f)
-            latest_pred_time = d.get('computed_at', '')
-        except:
-            pass
-
-    return jsonify({
-        'scheduler_running': True,
-        'data_files_count': len(data_files),
-        'hash_files_count': len(hash_files),
-        'cached_predictions_count': len(pred_files),
-        'cached_prediction_ids': pred_files[:10],
-        'latest_prediction_time': latest_pred_time,
-        'lstm_model_ready': is_lstm_ready(),
-        'auto_fetch_interval': '1小时',
-        'auto_prediction_interval': '30分钟',
-        'auto_training_schedule': '每天3:00AM',
-    })
+    """查询调度引擎v2完整状态"""
+    from scheduler import get_scheduler_status
+    return jsonify(get_scheduler_status())
 
 
 @app.route('/api/prediction-methods')

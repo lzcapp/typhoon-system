@@ -655,8 +655,11 @@ function initApp() {
   checkLSTMStatus();
   checkECMWFBUFRStatus();
   checkPanguStatus();
+  checkSchedulerStatus();  // ★ 检查后台引擎状态
   // 自动刷新：每5分钟检查活跃台风
   startAutoRefresh();
+  // 每2分钟刷新后台状态面板
+  setInterval(checkSchedulerStatus, 2 * 60 * 1000);
 }
 
 function initMap() {
@@ -902,19 +905,73 @@ async function apiCall(url, timeoutMs = 30000) {
   }
 }
 
-// 预测专用API调用：超时更长(5分钟)，自动降级
+// ============================================================
+// 预测数据获取: 缓存优先 → 实时计算回退
+// ============================================================
+
+let lastPredictionFreshness = null;  // 记录最后一次预测数据的新鲜度
+
 async function predictApiCall(tfbh, hours, method) {
+  // ★ 第一优先级: 查后台缓存（秒级响应）
+  try {
+    const cached = await apiCall(`/api/predictions/cached/${tfbh}/${hours}`, 5000);
+    if (cached && cached.predictions) {
+      const isFresh = cached.cache_fresh;
+      const ageMin = cached.cache_age_minutes || 0;
+      lastPredictionFreshness = {
+        fresh: isFresh,
+        age_minutes: ageMin,
+        computed_at: cached.computed_at || '',
+        source: '缓存',
+      };
+      
+      // 缓存新鲜(<30min): 直接返回，秒级体验
+      if (isFresh) {
+        return cached;
+      }
+      
+      // 缓存过时但可用: 先显示旧数据，后台触发更新
+      console.log(`预测缓存过时(${ageMin}分钟)，先显示旧数据，后台更新中`);
+      // 触发后台按需计算更新缓存（下次访问就是新的了）
+      fetch(`${API_BASE}/api/predictions/trigger/${tfbh}/${hours}?method=${method}`).catch(() => {});
+      return cached;
+    }
+  } catch(e) {
+    // 缓存查询失败（5秒超时），继续实时计算
+    console.log('缓存查询失败或超时，回退实时计算');
+  }
+
+  // ★ 第二优先级: 实时计算（30秒+等待）
   // 第一次尝试：用用户指定的方法（超时5分钟）
   const data = await apiCall(`/api/typhoons/predict/${tfbh}?hours=${hours}&method=${method}`, 300000);
-  if (data && data.predictions) return data;
+  if (data && data.predictions) {
+    lastPredictionFreshness = {
+      fresh: false,
+      age_minutes: 0,
+      computed_at: new Date().toISOString(),
+      source: '实时计算',
+    };
+    // 实时计算成功 → 触发后台缓存，下次访问秒级
+    fetch(`${API_BASE}/api/predictions/trigger/${tfbh}/${hours}?method=${method}`).catch(() => {});
+    return data;
+  }
 
   // 如果ensemble/all失败，自动降级到trend（秒级响应）
   if (method === 'ensemble' || method === 'all') {
     showToast('综合方法超时，自动降级为趋势外推...', true);
     const fallback = await apiCall(`/api/typhoons/predict/${tfbh}?hours=${hours}&method=trend`, 30000);
-    if (fallback && fallback.predictions) return fallback;
+    if (fallback && fallback.predictions) {
+      lastPredictionFreshness = {
+        fresh: false,
+        age_minutes: 0,
+        computed_at: new Date().toISOString(),
+        source: '实时计算(降级)',
+      };
+      return fallback;
+    }
   }
 
+  lastPredictionFreshness = null;
   return null;
 }
 
@@ -1158,6 +1215,11 @@ function renderTyphoonDetail(t) {
         <span id="ecmwfBufrStatus"></span>
         <br>
         <span id="panguStatus"></span>
+      </div>
+      <!-- ★ 后台引擎状态面板 -->
+      <div id="schedulerStatusPanel" style="margin-top:8px;font-size:11px;color:var(--text-secondary);padding:6px 8px;background:var(--bg-secondary);border-radius:6px;border:1px solid var(--border-color);display:none">
+        <div style="font-weight:600;margin-bottom:4px"><i class="fas fa-server"></i> 后台引擎</div>
+        <div id="schedulerStatusContent"></div>
       </div>
     </div>`;
 
@@ -1553,6 +1615,59 @@ async function checkPanguStatus() {
   }
 }
 
+// 查询后台调度引擎v2状态，显示在侧边栏
+async function checkSchedulerStatus() {
+  try {
+    const resp = await fetch(`${API_BASE}/api/scheduler/status`, { signal: AbortSignal.timeout(5000) });
+    const status = await resp.json();
+    const panel = document.getElementById('schedulerStatusPanel');
+    const content = document.getElementById('schedulerStatusContent');
+    if (!panel || !content) return;
+
+    panel.style.display = 'block';
+
+    const lastPred = status.last_prediction || '';
+    const lastFetch = status.last_data_fetch || '';
+    const activeCount = status.active_typhoon_count || 0;
+    const cacheCount = status.cached_predictions_count || 0;
+    const bufrAvailable = status.ecmwf_bufr_available;
+    const panguReady = status.pangu_model_ready;
+    const lstmReady = status.lstm_model_ready;
+
+    // 格式化时间
+    const fmtTime = (iso) => {
+      if (!iso) return '未运行';
+      try {
+        const d = new Date(iso);
+        const hh = d.getHours().toString().padStart(2, '0');
+        const mm = d.getMinutes().toString().padStart(2, '0');
+        return `${hh}:${mm}`;
+      } catch { return iso.slice(11,16) || '未运行'; }
+    };
+
+    const activeTag = activeCount > 0 
+      ? `<span style="color:#22c55e;font-weight:600">${activeCount}个活跃</span>` 
+      : '<span style="color:var(--text-secondary)">无活跃</span>';
+
+    content.innerHTML = `
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:3px 8px">
+        <span>活跃台风:</span><span>${activeTag}</span>
+        <span>缓存预测:</span><span>${cacheCount}个文件</span>
+        <span>数据更新:</span><span>${fmtTime(lastFetch)}</span>
+        <span>预测更新:</span><span>${fmtTime(lastPred)}</span>
+        <span>ECMWF BUFR:</span><span>${bufrAvailable ? '✅可用' : '⚠️未安装'}</span>
+        <span>Pangu模型:</span><span>${panguReady ? '✅可用' : '⚠️未下载'}</span>
+        <span>LSTM模型:</span><span>${lstmReady ? '✅已训练' : '⚠️未训练'}</span>
+      </div>
+      <div style="margin-top:4px;color:var(--text-secondary)">
+        自动: 数据1h / 预测30min / BUFR6h / 训练3:00AM
+      </div>
+    `;
+  } catch(e) {
+    console.log('Scheduler status check failed', e);
+  }
+}
+
 async function trainLSTM() {
   showLoading('正在训练LSTM模型，可能需要1-3分钟...');
   try {
@@ -1589,7 +1704,19 @@ async function loadAndRenderPrediction(tfbh, hours, method) {
   const predContainer = document.getElementById('predictionResults');
   if (!predContainer) return;
 
-  let html = '';
+  // ★ 显示数据新鲜度指标
+  let freshnessHtml = '';
+  if (lastPredictionFreshness) {
+    const f = lastPredictionFreshness;
+    const freshnessIcon = f.fresh ? '🟢' : '🟡';
+    const freshnessText = f.fresh 
+      ? `数据新鲜(${f.age_minutes}分钟前计算)` 
+      : `数据${f.age_minutes}分钟前${f.source}`;
+    const updateHint = f.fresh ? '' : ' — 后台正在更新';
+    freshnessHtml = `<div style="font-size:11px;color:var(--text-secondary);margin-bottom:4px;padding:2px 6px;background:var(--bg-secondary);border-radius:4px">${freshnessIcon} ${freshnessText}${updateHint}</div>`;
+  }
+
+  let html = freshnessHtml;
 
   // 渲染每种预测方法的结果
   for (const [methodKey, points] of Object.entries(data.predictions)) {
